@@ -43,6 +43,42 @@ THE ALTMAN Z-SCORE MODEL
 * 🔴 **Distress:** Z < 1.81
 
 ==============================================================================
+RAW_FEATURES EXTRACTOR (10-K HTML -> KAFKA JSON)
+==============================================================================
+`raw_features_spark_publisher.py` is the extraction job that converts raw 10-K HTML
+files into normalized financial metrics and publishes them to Kafka.
+
+**What it does:**
+* Reads filings from `assets/filings_10k/<ticker>/filing-YYYY-*.htm(l)`.
+* Extracts key metrics from Consolidated Balance Sheet and Consolidated Cash Flow tables:
+  `current_assets`, `current_liabilities`, `short_term_debt`, `long_term_debt`,
+  `stockholders_equity`, `total_assets`, `net_income`, `interest_expense`, `tax_expense`.
+* Merges filing-level metrics into one consolidated payload per company (from fiscal year 2015+).
+* Publishes one JSON message per company to the configured Kafka topic.
+
+Operate the extractor through the `Makefile` component target:
+
+```bash
+make raw_features process
+make raw_features process company=aapl
+make raw_features do_export
+make raw_features do_import
+```
+
+Use `make help` for configurable variables (`RAW_FEATURES_SPARK_PUBLISHER_*`) and defaults.
+Runtime logs are written to `logs/raw_features_spark_publisher.log`.
+
+**How it achieves this (implementation details):**
+The job enumerates company filings by filename (`filing-YYYY-*`) and filters by fiscal
+year threshold. It parallelizes file processing with Spark RDD partitions, then applies
+table-selection heuristics (keyword markers, exclusions, and year-density scoring) to
+choose the best Balance Sheet and Cash Flow tables from each HTML filing. Metric extractors
+in `src/raw_features/*_rules.py` parse values by year and validate required fields.
+Finally, `combine_metrics` merges all filing-level frames per company, keeps the most useful
+non-fallback values, preserves units in column labels, and serializes one JSON payload that
+is produced to Kafka with the company ticker as message key.
+
+==============================================================================
 EXECUTION INSTRUCTIONS
 ==============================================================================
 
@@ -67,13 +103,13 @@ STEP 0: CONFIGURE AND START KAFKA
 
 STEP 1: RUN DATA PRODUCER (TERMINAL 3)
 --------------------------------------
-Simulates real-time report ingestion from the cleaned CSV dataset.
+Simulates real-time report ingestion from market API data.
 
 1.  Navigate to project folder:
     cd /path/to/project
 
 2.  Run producer:
-    python3 producer.py
+    python3 produser.py
 
 ------------------------------------------------------------------------------
 
