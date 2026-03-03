@@ -1,5 +1,5 @@
 import re
-from typing import Iterator, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 from src.raw_features.consolidated_cashflow_statements_rules import CONSOLIDATED_BALANCE_SHEET_RULES, METRIC_EXTRACT
 from src.raw_features.constants import CASHFLOW_ERR_TEMPLATE, RAW_FEATURES
@@ -75,7 +75,7 @@ def _score_cashflow_candidate(serialized_html_table: str) -> int:
 
   return score
 
-def _select_cashflow_table(html_tables: list[str]) -> str | None:
+def _select_cashflow_table(html_tables: List[str]) -> Optional[str]:
   if not html_tables:
     return None
   if len(html_tables) == 1:
@@ -93,12 +93,12 @@ def _select_cashflow_table(html_tables: list[str]) -> str | None:
     return None
   return best_table
 
-def _collect_interest_supplemental_tables(html_text: str, selected_tables: list[str]) -> list[str]:
+def _collect_interest_supplemental_tables(html_text: str, selected_tables: List[str]) -> List[str]:
   from bs4 import BeautifulSoup
 
   selected_set = set(selected_tables)
   soup = BeautifulSoup(html_text, "html.parser")
-  supplemental: list[str] = []
+  supplemental: List[str] = []
   for table in soup.find_all("table"):
     serialized = str(table)
     if serialized in selected_set:

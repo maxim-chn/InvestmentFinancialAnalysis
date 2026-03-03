@@ -1,9 +1,15 @@
 import os
 from enum import Enum
 
+def get_required_env_var(name: str) -> str:
+  value = os.getenv(name)
+  if value is None or value.strip() == "":
+    raise RuntimeError(f"Missing required env var {name}")
+  return value.strip()
+
 BALANCE_SHEET_ERR_TEMPLATE = "failed to process balance sheet"
 CASHFLOW_ERR_TEMPLATE = "failed to process cash flow statement"
-BASE_DIR = os.path.join("/home", "zonenp", "final_project")
+BASE_DIR = get_required_env_var("RAW_FEATURES_SPARK_PUBLISHER_KAFKA_HOST")
 FILINGS_DIR = os.path.join(BASE_DIR, "assets", "filings_10k")
 RAW_TABLES_DIR = os.path.join(BASE_DIR, "assets", "raw_html_tables")
 TARGET_YEAR_PREFIX_TEMPLATE = "filing-%s-"

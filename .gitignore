@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 
 assets/filings_10k/
+1assets/filings_10k/README.md
 
 logs/*
 !logs/README.md

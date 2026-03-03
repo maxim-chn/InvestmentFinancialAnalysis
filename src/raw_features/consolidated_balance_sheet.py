@@ -1,5 +1,5 @@
 import re
-from typing import Iterator, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 from src.raw_features.consolidated_balance_sheet_rules import CONSOLIDATED_BALANCE_SHEET_RULES, METRIC_EXTRACT, extract_units
 from src.raw_features.constants import BALANCE_SHEET_ERR_TEMPLATE, RAW_FEATURES
@@ -77,7 +77,7 @@ def _score_balance_sheet_candidate(serialized_html_table: str) -> int:
 
   return score
 
-def _select_balance_sheet_table(html_tables: list[str]) -> str | None:
+def _select_balance_sheet_table(html_tables: List[str]) -> Optional[str]:
   if not html_tables:
     return None
   if len(html_tables) == 1:

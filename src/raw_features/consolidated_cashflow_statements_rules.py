@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 from src.raw_features.constants import RAW_FEATURES
 
@@ -91,7 +92,7 @@ def _year_headers(table) -> list[str]:
   return []
 
 
-def _parse_number(text: str) -> int | None:
+def _parse_number(text: str) -> Optional[int]:
   match = re.search(r"\d[\d,]*", text)
   if not match:
     stripped = text.strip()
@@ -320,7 +321,7 @@ def _extract_metric_from_rows(table, row_matcher) -> dict[str, int]:
       }
   return {}
 
-def extract_interest_expense(table) -> dict[str, int] | None:
+def extract_interest_expense(table) -> Optional[dict[str, int]]:
   interest_expense = _extract_metric_from_rows(table, _is_interest_expense_row)
   if interest_expense:
     return interest_expense
@@ -331,7 +332,7 @@ def extract_interest_expense(table) -> dict[str, int] | None:
 
   return None
 
-def extract_tax_expense(table) -> dict[str, int] | None:
+def extract_tax_expense(table) -> Optional[dict[str, int]]:
   tax_expense = _extract_metric_from_rows(table, _is_tax_expense_row)
   if tax_expense:
     return tax_expense
