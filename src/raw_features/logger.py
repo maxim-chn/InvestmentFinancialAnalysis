@@ -3,7 +3,13 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
-BASE_DIR = os.path.join("/home", "zonenp", "final_project")
+def get_required_env_var(name: str) -> str:
+  value = os.getenv(name)
+  if value is None or value.strip() == "":
+    raise RuntimeError(f"Missing required env var {name}")
+  return value.strip()
+
+BASE_DIR = get_required_env_var("RAW_FEATURES_SPARK_PUBLISHER_ROOT")
 LOGS_DIR = os.path.normpath(os.path.join(BASE_DIR, "logs"))
 LOG_PATH = os.path.join(LOGS_DIR, "raw_features_spark_publisher.log")
 _LOG_INITIALIZED = False
