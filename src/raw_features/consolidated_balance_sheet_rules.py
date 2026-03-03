@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Optional
 from src.raw_features.constants import RAW_FEATURES
 
 CURRENT_ASSETS_KEY = RAW_FEATURES.CURRENT_ASSETS.value
@@ -130,7 +131,7 @@ def _year_by_column(table) -> dict[int, str]:
   return {}
 
 
-def _parse_number(text: str) -> int | None:
+def _parse_number(text: str) -> Optional[int]:
   match = re.search(r"\d[\d,]*", text)
   if not match:
     stripped = text.strip()
@@ -154,7 +155,7 @@ def _normalize_metric_text(text: str) -> str:
   normalized = re.sub(r"\s+", " ", normalized).strip()
   return normalized
 
-def _detect_units(text: str) -> str | None:
+def _detect_units(text: str) -> Optional[str]:
   normalized = text.lower()
   patterns = (
     r"\$\s*(?:in\s*)?(thousands|millions|billions)",
@@ -491,7 +492,11 @@ def _is_short_term_debt_keyword_row(row_text: str) -> bool:
     return _has_debt_marker(row_text)
   return False
 
-def _short_term_debt_score(row_text: str, section: str | None, in_liabilities: bool) -> int | None:
+def _short_term_debt_score(
+  row_text: str,
+  section: Optional[str],
+  in_liabilities: bool
+) -> Optional[int]:
   if not in_liabilities:
     return None
   if not _is_short_term_debt_keyword_row(row_text):
@@ -536,7 +541,11 @@ def _short_term_debt_score(row_text: str, section: str | None, in_liabilities: b
   return score
 
 
-def _long_term_debt_score(row_text: str, section: str | None, in_liabilities: bool) -> int | None:
+def _long_term_debt_score(
+  row_text: str,
+  section: Optional[str],
+  in_liabilities: bool
+) -> Optional[int]:
   if not in_liabilities:
     return None
   if not _is_long_term_debt_keyword_row(row_text):
@@ -576,9 +585,9 @@ def extract_long_term_debt(table) -> dict[str, int]:
     return {}
 
   in_liabilities = False
-  section: str | None = None
-  best_score: int | None = None
-  best_results: dict[str, int] | None = None
+  section: Optional[str] = None
+  best_score: Optional[int] = None
+  best_results: Optional[dict[str, int]] = None
   long_term_debt_like_in_liabilities = False
 
   for row in table.find_all("tr"):
@@ -633,9 +642,9 @@ def extract_short_term_debt(table) -> dict[str, int]:
     return {}
 
   in_liabilities = False
-  section: str | None = None
-  best_score: int | None = None
-  best_results: dict[str, int] | None = None
+  section: Optional[str] = None
+  best_score: Optional[int] = None
+  best_results: Optional[dict[str, int]] = None
   debt_like_in_liabilities = False
 
   for row in table.find_all("tr"):

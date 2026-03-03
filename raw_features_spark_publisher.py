@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import re
 
-from typing import Iterable, List, Tuple
+from typing import List, Optional, Tuple
 
 from pyspark.sql import SparkSession
 
@@ -64,7 +64,7 @@ def setup_kafka_channel():
   producer = Producer({"bootstrap.servers": f"{kafka_host}:{kafka_port}"})
   return producer, kafka_channel
 
-def extract_fiscal_year(filename: str) -> str | None:
+def extract_fiscal_year(filename: str) -> Optional[str]:
   match = re.match(r"^filing-(\d{4})-", filename)
   if not match:
     return None

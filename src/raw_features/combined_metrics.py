@@ -4,7 +4,7 @@ import json
 import re
 from io import StringIO
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -31,7 +31,7 @@ def is_fallback_metric_value(value: object) -> bool:
     return value.strip().lower() in FALLBACK_VALUES
   return False
 
-def parse_metric_column(column: object) -> Tuple[int | None, str | None]:
+def parse_metric_column(column: object) -> Tuple[Optional[int], Optional[str]]:
   label = str(column).strip()
   match = re.match(r"^(\d{4})(?:\s*\((.+)\))?$", label)
   if not match:
@@ -44,7 +44,7 @@ def parse_metric_column(column: object) -> Tuple[int | None, str | None]:
       unit = None
   return year, unit
 
-def format_metric_column(year: int, unit: str | None) -> str:
+def format_metric_column(year: int, unit: Optional[str]) -> str:
   if unit is None:
     return str(year)
   return f"{year} ({unit})"
@@ -76,7 +76,7 @@ def merge_company_metric_frames(
   fiscal_year_threshold: int
 ) -> Dict[str, Dict[str, object]]:
   metric_values: Dict[str, Dict[int, object]] = {}
-  metric_units: Dict[str, Dict[int, str | None]] = {}
+  metric_units: Dict[str, Dict[int, Optional[str]]] = {}
   metric_order: List[str] = []
 
   for _filing_year, filing_df in sorted(filing_metric_frames, key=lambda item: item[0]):
