@@ -8,6 +8,7 @@ TOTAL_ASSETS_KEY = RAW_FEATURES.TOTAL_ASSETS.value
 LONG_TERM_DEBT_KEY = RAW_FEATURES.LONG_TERM_DEBT.value
 SHORT_TERM_DEBT_KEY = RAW_FEATURES.SHORT_TERM_DEBT.value
 STOCKHOLDERS_EQUITY_KEY = RAW_FEATURES.STOCKHOLDERS_EQUITY.value
+RETAINED_EARNINGS_KEY = RAW_FEATURES.RETAINED_EARNINGS.value
 
 CORE_BALANCE_SHEET_TERMS = (
   "total current assets",
@@ -180,6 +181,10 @@ def _target_years(table, year_by_col: dict[int, str]) -> list[str]:
     return sorted(set(year_by_col.values()))
   return []
 
+def extract_fiscal_years(table) -> list[str]:
+  year_by_col = _year_by_column(table)
+  return _target_years(table, year_by_col)
+
 
 def _parse_number(text: str) -> Optional[int]:
   match = re.search(r"\d[\d,]*", text)
@@ -192,6 +197,20 @@ def _parse_number(text: str) -> Optional[int]:
   if "(" in text and ")" in text:
     return -value
   return value
+
+def _cell_is_negative(cell, text: str) -> bool:
+  normalized = text.strip()
+  compact = re.sub(r"\s+", "", normalized)
+  if re.fullmatch(r"\(?\$?\d[\d,]*(?:\.\d+)?\)?", compact):
+    if compact.startswith("(") or compact.endswith(")"):
+      return True
+  if re.search(r"-\s*\d", normalized):
+    return True
+  for tag in cell.find_all(True):
+    name = (tag.name or "").lower()
+    if name.endswith("nonfraction") and tag.get("sign") == "-":
+      return True
+  return False
 
 def _normalize_metric_text(text: str) -> str:
   normalized = text.lower()
@@ -569,6 +588,71 @@ def extract_stockholders_equity(table) -> dict[str, int]:
     return results
   return {}
 
+def _is_retained_earnings_row(row_text: str) -> bool:
+  normalized = _normalize_label_text(row_text)
+  return any(
+    marker in normalized
+    for marker in (
+      "retained earnings",
+      "retained deficit",
+      "accumulated deficit",
+      "accumulated earnings",
+    )
+  )
+
+def extract_retained_earnings(table) -> dict[str, int]:
+  year_by_col = _year_by_column(table)
+  years = _target_years(table, year_by_col)
+  if not year_by_col:
+    year_by_col = {}
+  if not year_by_col and not years:
+    return {}
+
+  retained_earnings_fact_markers = (
+    'name="us-gaap:retainedearningsaccumulateddeficit"',
+    "name='us-gaap:retainedearningsaccumulateddeficit'",
+    'name="us-gaap:retainedearnings"',
+    "name='us-gaap:retainedearnings'",
+  )
+
+  for row in table.find_all("tr"):
+    row_text = _normalize_metric_text(row.get_text(" ", strip=True))
+    row_html = str(row).lower()
+    has_fact_marker = any(marker in row_html for marker in retained_earnings_fact_markers)
+    if not has_fact_marker and not _is_retained_earnings_row(row_text):
+      continue
+
+    results: dict[str, int] = {}
+    ordered_values: list[int] = []
+    col_idx = 0
+    for cell in row.find_all(["td", "th"]):
+      colspan = int(cell.get("colspan", 1))
+      cell_text = cell.get_text(" ", strip=True)
+      value = _parse_number(cell_text)
+      if value is not None:
+        if _cell_is_negative(cell, cell_text):
+          value = -abs(value)
+        for offset in range(colspan):
+          year = year_by_col.get(col_idx + offset)
+          if year and year not in results:
+            results[year] = value
+        if not any(ch.isalpha() for ch in cell_text):
+          ordered_values.append(value)
+      col_idx += colspan
+    if results:
+      if not years:
+        return results
+      if all(year in results for year in years):
+        return results
+    if years and ordered_values:
+      return {
+        year: ordered_values[idx]
+        for idx, year in enumerate(years)
+        if idx < len(ordered_values)
+      }
+    return results
+  return {}
+
 def _is_long_term_debt_keyword_row(row_text: str) -> bool:
   debt_keywords = (
     "long-term debt",
@@ -901,4 +985,5 @@ METRIC_EXTRACT = {
   LONG_TERM_DEBT_KEY: extract_long_term_debt,
   SHORT_TERM_DEBT_KEY: extract_short_term_debt,
   STOCKHOLDERS_EQUITY_KEY: extract_stockholders_equity,
+  RETAINED_EARNINGS_KEY: extract_retained_earnings,
 }
