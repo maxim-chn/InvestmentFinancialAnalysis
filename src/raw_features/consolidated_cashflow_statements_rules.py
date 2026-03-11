@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import re
 from typing import Optional
 
@@ -217,6 +215,44 @@ def _is_tax_expense_row(row_text: str) -> bool:
     return True
   return False
 
+def _is_total_revenue_row(row_text: str) -> bool:
+  normalized = re.sub(r"\s+", " ", row_text).strip()
+  if not normalized:
+    return False
+  if re.match(r"^total\s+revenues?\s+and\s+other\s+income\b", normalized):
+    return True
+  if any(
+    marker in normalized
+    for marker in (
+      "cost of revenue",
+      "cost of revenues",
+      "cost of sales",
+      "cost of goods sold",
+      "deferred revenue",
+      "unearned revenue",
+      "other revenue",
+      "other revenues",
+      "non-revenue",
+      "segment revenue",
+      "segment revenues",
+      "per share",
+    )
+  ):
+    return False
+  if re.match(r"^total\s+revenues?\b", normalized):
+    return True
+  if re.match(r"^total\s+net\s+sales\b", normalized):
+    return True
+  if re.match(r"^net\s+sales\b", normalized):
+    return True
+  if re.match(r"^net\s+revenues?\b", normalized):
+    return True
+  if re.match(r"^sales\s+revenue\b", normalized):
+    return True
+  if re.match(r"^revenues?\b", normalized):
+    return True
+  return False
+
 def _is_tax_paid_row(row_text: str) -> bool:
   if "tax" not in row_text:
     return False
@@ -233,6 +269,21 @@ def _is_tax_paid_row(row_text: str) -> bool:
     return True
   if "tax paid" in row_text and "payroll" not in row_text:
     return True
+  return False
+
+def _is_deferred_tax_row(row_text: str) -> bool:
+  if "deferred income tax" in row_text or "deferred income taxes" in row_text:
+    return True
+  if "deferred tax" in row_text:
+    return not any(
+      marker in row_text
+      for marker in (
+        "assets",
+        "liabilities",
+        "asset",
+        "liability",
+      )
+    )
   return False
 
 
@@ -274,13 +325,17 @@ def extract_net_income(table) -> dict[str, int]:
           ordered_values.append(value)
       col_idx += colspan
     if results:
-      return results
+      if not years:
+        return results
+      if all(year in results for year in years):
+        return results
     if years and ordered_values:
       return {
         year: ordered_values[idx]
         for idx, year in enumerate(years)
         if idx < len(ordered_values)
       }
+    return results
   return {}
 
 def _extract_metric_from_rows(table, row_matcher) -> dict[str, int]:
@@ -312,13 +367,17 @@ def _extract_metric_from_rows(table, row_matcher) -> dict[str, int]:
           ordered_values.append(value)
       col_idx += colspan
     if results:
-      return results
+      if not years:
+        return results
+      if all(year in results for year in years):
+        return results
     if years and ordered_values:
       return {
         year: ordered_values[idx]
         for idx, year in enumerate(years)
         if idx < len(ordered_values)
       }
+    return results
   return {}
 
 def extract_interest_expense(table) -> Optional[dict[str, int]]:
@@ -341,6 +400,16 @@ def extract_tax_expense(table) -> Optional[dict[str, int]]:
   if tax_paid:
     return tax_paid
 
+  deferred_tax = _extract_metric_from_rows(table, _is_deferred_tax_row)
+  if deferred_tax:
+    return deferred_tax
+
+  return None
+
+def extract_total_revenue(table) -> Optional[dict[str, int]]:
+  total_revenue = _extract_metric_from_rows(table, _is_total_revenue_row)
+  if total_revenue:
+    return total_revenue
   return None
 
 
@@ -350,4 +419,5 @@ METRIC_EXTRACT = {
   RAW_FEATURES.NET_INCOME.value: extract_net_income,
   RAW_FEATURES.INTEREST_EXPENSE.value: extract_interest_expense,
   RAW_FEATURES.TAX_EXPENSE.value: extract_tax_expense,
+  RAW_FEATURES.TOTAL_REVENUE.value: extract_total_revenue,
 }
