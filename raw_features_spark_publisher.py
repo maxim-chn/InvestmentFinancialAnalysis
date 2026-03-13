@@ -6,12 +6,13 @@ from __future__ import annotations
 
 import os
 import re
+import json
 
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from pyspark.sql import SparkSession
 
-from src.raw_features.combined_metrics import combine_metrics
+from src.raw_features.combined_metrics import combine_metrics, parse_metric_column
 from src.raw_features.consolidated_balance_sheet import (
   extract_metrics as extract_balance_sheet_metrics,
   read_raw_balance_sheet
@@ -116,6 +117,47 @@ def list_all_company_filings(base_dir: str) -> List[Tuple[str, str]]:
       continue
     filings.extend(list_company_filings(base_dir, dirname))
   return filings
+
+def build_year_first_publish_records(
+  combined_metrics: List[Tuple[str, str]]
+) -> List[Tuple[int, str, str]]:
+  rows_by_year: Dict[int, List[Tuple[str, str]]] = {}
+
+  for company, serialized_metrics in combined_metrics:
+    try:
+      payload = json.loads(serialized_metrics)
+    except json.JSONDecodeError:
+      continue
+
+    ticker = str(payload.get("ticker", payload.get("ticket", company))).lower().strip()
+    metrics_by_year: Dict[int, Dict[str, object]] = {}
+
+    for metric_name, metric_values in payload.items():
+      if metric_name in ("ticker", "ticket"):
+        continue
+      if not isinstance(metric_values, dict):
+        continue
+      for column_label, metric_value in metric_values.items():
+        year, unit = parse_metric_column(column_label)
+        if year is None:
+          continue
+        row = metrics_by_year.setdefault(year, {"ticker": ticker, "year": year})
+        row[metric_name] = metric_value
+        if unit:
+          units = row.setdefault("units", {})
+          if isinstance(units, dict) and metric_name not in units:
+            units[metric_name] = unit
+
+    for year, year_payload in metrics_by_year.items():
+      rows_by_year.setdefault(year, []).append(
+        (ticker, json.dumps(year_payload))
+      )
+
+  ordered_records: List[Tuple[int, str, str]] = []
+  for year in sorted(rows_by_year.keys()):
+    for ticker, serialized_payload in sorted(rows_by_year[year], key=lambda item: item[0]):
+      ordered_records.append((year, ticker, serialized_payload))
+  return ordered_records
 
 def main() -> None:
   fiscal_year_threshold = get_fiscal_year_threshold()
@@ -279,18 +321,30 @@ def main() -> None:
     log_message(str(e), "ERROR")
     return
 
-  for company, serialized_metrics in combined_metrics:
+  publish_records = build_year_first_publish_records(combined_metrics)
+  if not publish_records:
+    log_message("No yearly records were generated from combined metrics", "ERROR")
+    return
+
+  log_message(
+    "Publishing %s yearly raw-feature records to kafka channel '%s' in year-first order" % (
+      str(len(publish_records)),
+      kafka_channel
+    )
+  )
+
+  for year, company, serialized_metrics in publish_records:
     kafka_producer.produce(kafka_channel, key=company, value=serialized_metrics)
     kafka_producer.poll(0)
     log_message(
-      "Published metrics for company '%s' to kafka channel '%s'" % (
+      "Published metrics for fiscal year %s -- company '%s' to kafka channel '%s'" % (
+        str(year),
         company.upper(),
         kafka_channel
       )
     )
 
   kafka_producer.flush()
-  log_message(combined_metrics, "DEBUG")
   
   spark.stop()
 

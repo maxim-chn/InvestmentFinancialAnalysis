@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import re
 from typing import Optional
 from src.raw_features.constants import RAW_FEATURES
@@ -10,6 +8,7 @@ TOTAL_ASSETS_KEY = RAW_FEATURES.TOTAL_ASSETS.value
 LONG_TERM_DEBT_KEY = RAW_FEATURES.LONG_TERM_DEBT.value
 SHORT_TERM_DEBT_KEY = RAW_FEATURES.SHORT_TERM_DEBT.value
 STOCKHOLDERS_EQUITY_KEY = RAW_FEATURES.STOCKHOLDERS_EQUITY.value
+RETAINED_EARNINGS_KEY = RAW_FEATURES.RETAINED_EARNINGS.value
 
 CORE_BALANCE_SHEET_TERMS = (
   "total current assets",
@@ -26,6 +25,14 @@ EQUITY_TERMS = (
   "stockholders deficit",
   "shareholders' deficit",
   "shareholders deficit",
+  "stockholders' deficit equity",
+  "stockholders deficit equity",
+  "shareholders' deficit equity",
+  "shareholders deficit equity",
+  "stockholders' equity deficit",
+  "stockholders equity deficit",
+  "shareholders' equity deficit",
+  "shareholders equity deficit",
 )
 
 LIABILITIES_EQUITY_MARKERS = (
@@ -38,6 +45,14 @@ LIABILITIES_EQUITY_MARKERS = (
   "liabilities and stockholders deficit",
   "liabilities and shareholders' deficit",
   "liabilities and shareholders deficit",
+  "liabilities and stockholders' deficit equity",
+  "liabilities and stockholders deficit equity",
+  "liabilities and shareholders' deficit equity",
+  "liabilities and shareholders deficit equity",
+  "liabilities and stockholders' equity deficit",
+  "liabilities and stockholders equity deficit",
+  "liabilities and shareholders' equity deficit",
+  "liabilities and shareholders equity deficit",
 )
 
 BALANCE_SHEET_EXCLUSION_PATTERNS = (
@@ -55,12 +70,29 @@ def _has_consolidated_balance_sheet_heading(text: str) -> bool:
     and "balance sheet" in text
   )
 
+def _normalize_label_text(text: str) -> str:
+  normalized = _normalize_metric_text(text)
+  normalized = normalized.replace("(", " ").replace(")", " ")
+  normalized = re.sub(r"\s+", " ", normalized).strip()
+  return normalized
+
 def _has_liabilities_equity_marker(table_text: str) -> bool:
-  if any(marker in table_text for marker in LIABILITIES_EQUITY_MARKERS):
+  marker_text = _normalize_label_text(table_text)
+  if any(marker in marker_text for marker in LIABILITIES_EQUITY_MARKERS):
+    return True
+  if re.search(
+    r"liabilities\s+and\s+(?:stockholders'?|shareholders'?)\s+(?:deficit\s+)?equity\b",
+    marker_text
+  ):
+    return True
+  if re.search(
+    r"liabilities\s+and\s+(?:stockholders'?|shareholders'?)\s+equity\s+deficit\b",
+    marker_text
+  ):
     return True
   return (
-    "liabilities" in table_text
-    and any(term in table_text for term in EQUITY_TERMS)
+    "liabilities" in marker_text
+    and any(term in marker_text for term in EQUITY_TERMS)
   )
 
 def _context_text(table, limit: int = 20) -> str:
@@ -130,6 +162,29 @@ def _year_by_column(table) -> dict[int, str]:
       }
   return {}
 
+def _year_headers(table) -> list[str]:
+  for row in table.find_all("tr"):
+    years: list[str] = []
+    for cell in row.find_all(["td", "th"]):
+      for match in re.findall(r"\b(20\d{2})\b", cell.get_text(" ", strip=True)):
+        if match not in years:
+          years.append(match)
+    if len(years) >= 2:
+      return years
+  return []
+
+def _target_years(table, year_by_col: dict[int, str]) -> list[str]:
+  header_years = _year_headers(table)
+  if header_years:
+    return header_years
+  if year_by_col:
+    return sorted(set(year_by_col.values()))
+  return []
+
+def extract_fiscal_years(table) -> list[str]:
+  year_by_col = _year_by_column(table)
+  return _target_years(table, year_by_col)
+
 
 def _parse_number(text: str) -> Optional[int]:
   match = re.search(r"\d[\d,]*", text)
@@ -142,6 +197,20 @@ def _parse_number(text: str) -> Optional[int]:
   if "(" in text and ")" in text:
     return -value
   return value
+
+def _cell_is_negative(cell, text: str) -> bool:
+  normalized = text.strip()
+  compact = re.sub(r"\s+", "", normalized)
+  if re.fullmatch(r"\(?\$?\d[\d,]*(?:\.\d+)?\)?", compact):
+    if compact.startswith("(") or compact.endswith(")"):
+      return True
+  if re.search(r"-\s*\d", normalized):
+    return True
+  for tag in cell.find_all(True):
+    name = (tag.name or "").lower()
+    if name.endswith("nonfraction") and tag.get("sign") == "-":
+      return True
+  return False
 
 def _normalize_metric_text(text: str) -> str:
   normalized = text.lower()
@@ -229,51 +298,90 @@ def extract_units(table) -> dict[str, str]:
 
 def extract_current_assets(table) -> dict[str, int]:
   year_by_col = _year_by_column(table)
+  years = _year_headers(table)
   if not year_by_col:
+    year_by_col = {}
+  if not year_by_col and not years:
     return {}
   for row in table.find_all("tr"):
-    row_text = row.get_text(" ", strip=True).lower()
+    row_text = _normalize_metric_text(row.get_text(" ", strip=True))
     if "total current assets" not in row_text:
       continue
     results: dict[str, int] = {}
+    ordered_values: list[int] = []
     col_idx = 0
     for cell in row.find_all(["td", "th"]):
       colspan = int(cell.get("colspan", 1))
-      value = _parse_number(cell.get_text(" ", strip=True))
+      cell_text = cell.get_text(" ", strip=True)
+      value = _parse_number(cell_text)
       if value is not None:
         for offset in range(colspan):
           year = year_by_col.get(col_idx + offset)
           if year and year not in results:
             results[year] = value
+        if not any(ch.isalpha() for ch in cell_text):
+          ordered_values.append(value)
       col_idx += colspan
+    if results:
+      if not years:
+        return results
+      if all(year in results for year in years):
+        return results
+    if years and ordered_values:
+      return {
+        year: ordered_values[idx]
+        for idx, year in enumerate(years)
+        if idx < len(ordered_values)
+      }
     return results
   return {}
 
 def extract_current_liabilities(table) -> dict[str, int]:
   year_by_col = _year_by_column(table)
+  years = _year_headers(table)
   if not year_by_col:
+    year_by_col = {}
+  if not year_by_col and not years:
     return {}
   for row in table.find_all("tr"):
-    row_text = row.get_text(" ", strip=True).lower()
+    row_text = _normalize_metric_text(row.get_text(" ", strip=True))
     if "total current liabilities" not in row_text:
       continue
     results: dict[str, int] = {}
+    ordered_values: list[int] = []
     col_idx = 0
     for cell in row.find_all(["td", "th"]):
       colspan = int(cell.get("colspan", 1))
-      value = _parse_number(cell.get_text(" ", strip=True))
+      cell_text = cell.get_text(" ", strip=True)
+      value = _parse_number(cell_text)
       if value is not None:
         for offset in range(colspan):
           year = year_by_col.get(col_idx + offset)
           if year and year not in results:
             results[year] = value
+        if not any(ch.isalpha() for ch in cell_text):
+          ordered_values.append(value)
       col_idx += colspan
+    if results:
+      if not years:
+        return results
+      if all(year in results for year in years):
+        return results
+    if years and ordered_values:
+      return {
+        year: ordered_values[idx]
+        for idx, year in enumerate(years)
+        if idx < len(ordered_values)
+      }
     return results
   return {}
 
 def extract_total_assets(table) -> dict[str, int]:
   year_by_col = _year_by_column(table)
+  years = _target_years(table, year_by_col)
   if not year_by_col:
+    year_by_col = {}
+  if not year_by_col and not years:
     return {}
 
   total_assets_fallback_markers = (
@@ -285,6 +393,14 @@ def extract_total_assets(table) -> dict[str, int]:
     "total liabilities and stockholders deficit",
     "total liabilities and shareholders' deficit",
     "total liabilities and shareholders deficit",
+    "total liabilities and stockholders' deficit equity",
+    "total liabilities and stockholders deficit equity",
+    "total liabilities and shareholders' deficit equity",
+    "total liabilities and shareholders deficit equity",
+    "total liabilities and stockholders' equity deficit",
+    "total liabilities and stockholders equity deficit",
+    "total liabilities and shareholders' equity deficit",
+    "total liabilities and shareholders equity deficit",
     "liabilities and stockholders' equity",
     "liabilities and stockholders equity",
     "liabilities and shareholders' equity",
@@ -293,6 +409,14 @@ def extract_total_assets(table) -> dict[str, int]:
     "liabilities and stockholders deficit",
     "liabilities and shareholders' deficit",
     "liabilities and shareholders deficit",
+    "liabilities and stockholders' deficit equity",
+    "liabilities and stockholders deficit equity",
+    "liabilities and shareholders' deficit equity",
+    "liabilities and shareholders deficit equity",
+    "liabilities and stockholders' equity deficit",
+    "liabilities and stockholders equity deficit",
+    "liabilities and shareholders' equity deficit",
+    "liabilities and shareholders equity deficit",
   )
 
   total_assets_xbrl_concepts = (
@@ -312,14 +436,15 @@ def extract_total_assets(table) -> dict[str, int]:
   awaiting_total_assets_values = False
   for row in table.find_all("tr"):
     row_text = _normalize_metric_text(row.get_text(" ", strip=True))
+    marker_row_text = _normalize_label_text(row_text)
     row_html = str(row).lower()
     has_total_assets_xbrl = any(
       f'name="{concept}"' in row_html or f"name='{concept}'" in row_html
       for concept in total_assets_xbrl_concepts
     )
     has_total_assets_marker = (
-      "total assets" in row_text
-      or any(marker in row_text for marker in total_assets_fallback_markers)
+      "total assets" in marker_row_text
+      or any(marker in marker_row_text for marker in total_assets_fallback_markers)
     )
     candidate_by_split_layout = awaiting_total_assets_values and _is_unlabeled_numeric_total_row(row_text)
     if (
@@ -329,24 +454,38 @@ def extract_total_assets(table) -> dict[str, int]:
     ):
       continue
     results: dict[str, int] = {}
+    ordered_values: list[int] = []
     col_idx = 0
     for cell in row.find_all(["td", "th"]):
       colspan = int(cell.get("colspan", 1))
-      value = _parse_number(cell.get_text(" ", strip=True))
+      cell_text = cell.get_text(" ", strip=True)
+      value = _parse_number(cell_text)
       if value is not None:
         for offset in range(colspan):
           year = year_by_col.get(col_idx + offset)
           if year and year not in results:
             results[year] = value
+        if not any(ch.isalpha() for ch in cell_text):
+          ordered_values.append(value)
       col_idx += colspan
     if results:
-      return results
+      if not years:
+        return results
+      if all(year in results for year in years):
+        return results
+    if years and ordered_values:
+      return {
+        year: ordered_values[idx]
+        for idx, year in enumerate(years)
+        if idx < len(ordered_values)
+      }
     if has_total_assets_marker or has_total_assets_xbrl:
       awaiting_total_assets_values = True
   return {}
 
 def _is_stockholders_equity_row(row_text: str) -> bool:
   row_text = _normalize_metric_text(row_text)
+  marker_row_text = _normalize_label_text(row_text)
   primary_markers = (
     "total stockholders' equity",
     "total stockholders equity",
@@ -366,13 +505,40 @@ def _is_stockholders_equity_row(row_text: str) -> bool:
     "total common stockholders deficit",
     "total common shareholders' deficit",
     "total common shareholders deficit",
+    "total stockholders' deficit equity",
+    "total stockholders deficit equity",
+    "total shareholders' deficit equity",
+    "total shareholders deficit equity",
+    "total common stockholders' deficit equity",
+    "total common stockholders deficit equity",
+    "total common shareholders' deficit equity",
+    "total common shareholders deficit equity",
+    "total stockholders' equity deficit",
+    "total stockholders equity deficit",
+    "total shareholders' equity deficit",
+    "total shareholders equity deficit",
+    "total common stockholders' equity deficit",
+    "total common stockholders equity deficit",
+    "total common shareholders' equity deficit",
+    "total common shareholders equity deficit",
   )
-  if any(marker in row_text for marker in primary_markers):
+  if any(marker in marker_row_text for marker in primary_markers):
     return True
 
-  if "total equity" in row_text:
+  if re.search(
+    r"\btotal\s+(?:common\s+)?(?:stockholders'?|shareholders'?)\s+(?:deficit\s+)?equity\b",
+    marker_row_text
+  ):
+    return True
+  if re.search(
+    r"\btotal\s+(?:common\s+)?(?:stockholders'?|shareholders'?)\s+equity\s+deficit\b",
+    marker_row_text
+  ):
+    return True
+
+  if "total equity" in marker_row_text:
     return not any(
-      marker in row_text
+      marker in marker_row_text
       for marker in (
         "liabilities and equity",
         "liabilities & equity",
@@ -384,23 +550,106 @@ def _is_stockholders_equity_row(row_text: str) -> bool:
 
 def extract_stockholders_equity(table) -> dict[str, int]:
   year_by_col = _year_by_column(table)
+  years = _target_years(table, year_by_col)
   if not year_by_col:
+    year_by_col = {}
+  if not year_by_col and not years:
     return {}
   for row in table.find_all("tr"):
     row_text = _normalize_metric_text(row.get_text(" ", strip=True))
     if not _is_stockholders_equity_row(row_text):
       continue
     results: dict[str, int] = {}
+    ordered_values: list[int] = []
     col_idx = 0
     for cell in row.find_all(["td", "th"]):
       colspan = int(cell.get("colspan", 1))
-      value = _parse_number(cell.get_text(" ", strip=True))
+      cell_text = cell.get_text(" ", strip=True)
+      value = _parse_number(cell_text)
       if value is not None:
         for offset in range(colspan):
           year = year_by_col.get(col_idx + offset)
           if year and year not in results:
             results[year] = value
+        if not any(ch.isalpha() for ch in cell_text):
+          ordered_values.append(value)
       col_idx += colspan
+    if results:
+      if not years:
+        return results
+      if all(year in results for year in years):
+        return results
+    if years and ordered_values:
+      return {
+        year: ordered_values[idx]
+        for idx, year in enumerate(years)
+        if idx < len(ordered_values)
+      }
+    return results
+  return {}
+
+def _is_retained_earnings_row(row_text: str) -> bool:
+  normalized = _normalize_label_text(row_text)
+  return any(
+    marker in normalized
+    for marker in (
+      "retained earnings",
+      "retained deficit",
+      "accumulated deficit",
+      "accumulated earnings",
+    )
+  )
+
+def extract_retained_earnings(table) -> dict[str, int]:
+  year_by_col = _year_by_column(table)
+  years = _target_years(table, year_by_col)
+  if not year_by_col:
+    year_by_col = {}
+  if not year_by_col and not years:
+    return {}
+
+  retained_earnings_fact_markers = (
+    'name="us-gaap:retainedearningsaccumulateddeficit"',
+    "name='us-gaap:retainedearningsaccumulateddeficit'",
+    'name="us-gaap:retainedearnings"',
+    "name='us-gaap:retainedearnings'",
+  )
+
+  for row in table.find_all("tr"):
+    row_text = _normalize_metric_text(row.get_text(" ", strip=True))
+    row_html = str(row).lower()
+    has_fact_marker = any(marker in row_html for marker in retained_earnings_fact_markers)
+    if not has_fact_marker and not _is_retained_earnings_row(row_text):
+      continue
+
+    results: dict[str, int] = {}
+    ordered_values: list[int] = []
+    col_idx = 0
+    for cell in row.find_all(["td", "th"]):
+      colspan = int(cell.get("colspan", 1))
+      cell_text = cell.get_text(" ", strip=True)
+      value = _parse_number(cell_text)
+      if value is not None:
+        if _cell_is_negative(cell, cell_text):
+          value = -abs(value)
+        for offset in range(colspan):
+          year = year_by_col.get(col_idx + offset)
+          if year and year not in results:
+            results[year] = value
+        if not any(ch.isalpha() for ch in cell_text):
+          ordered_values.append(value)
+      col_idx += colspan
+    if results:
+      if not years:
+        return results
+      if all(year in results for year in years):
+        return results
+    if years and ordered_values:
+      return {
+        year: ordered_values[idx]
+        for idx, year in enumerate(years)
+        if idx < len(ordered_values)
+      }
     return results
   return {}
 
@@ -581,7 +830,10 @@ def _long_term_debt_score(
 
 def extract_long_term_debt(table) -> dict[str, int]:
   year_by_col = _year_by_column(table)
+  years = _target_years(table, year_by_col)
   if not year_by_col:
+    year_by_col = {}
+  if not year_by_col and not years:
     return {}
 
   in_liabilities = False
@@ -609,36 +861,52 @@ def extract_long_term_debt(table) -> dict[str, int]:
     long_term_debt_like_in_liabilities = True
 
     results: dict[str, int] = {}
+    ordered_values: list[int] = []
     col_idx = 0
     for cell in row.find_all(["td", "th"]):
       colspan = int(cell.get("colspan", 1))
-      value = _parse_number(cell.get_text(" ", strip=True))
+      cell_text = cell.get_text(" ", strip=True)
+      value = _parse_number(cell_text)
       if value is not None:
         for offset in range(colspan):
           year = year_by_col.get(col_idx + offset)
           if year and year not in results:
             results[year] = value
+        if not any(ch.isalpha() for ch in cell_text):
+          ordered_values.append(value)
       col_idx += colspan
 
-    if not results:
+    candidate_results: dict[str, int] = {}
+    if results:
+      if not years or all(year in results for year in years):
+        candidate_results = results
+    if not candidate_results and years and ordered_values:
+      candidate_results = {
+        year: ordered_values[idx]
+        for idx, year in enumerate(years)
+        if idx < len(ordered_values)
+      }
+    if not candidate_results:
       continue
 
     if best_score is None or score > best_score or (score == best_score and section in ("noncurrent", "after_current")):
       best_score = score
-      best_results = results
+      best_results = candidate_results
 
   if best_results is not None:
     return best_results
 
   if not long_term_debt_like_in_liabilities:
-    years = sorted(set(year_by_col.values()))
     return {year: 0 for year in years}
 
   return {}
 
 def extract_short_term_debt(table) -> dict[str, int]:
   year_by_col = _year_by_column(table)
+  years = _target_years(table, year_by_col)
   if not year_by_col:
+    year_by_col = {}
+  if not year_by_col and not years:
     return {}
 
   in_liabilities = False
@@ -668,29 +936,42 @@ def extract_short_term_debt(table) -> dict[str, int]:
       continue
 
     results: dict[str, int] = {}
+    ordered_values: list[int] = []
     col_idx = 0
     for cell in row.find_all(["td", "th"]):
       colspan = int(cell.get("colspan", 1))
-      value = _parse_number(cell.get_text(" ", strip=True))
+      cell_text = cell.get_text(" ", strip=True)
+      value = _parse_number(cell_text)
       if value is not None:
         for offset in range(colspan):
           year = year_by_col.get(col_idx + offset)
           if year and year not in results:
             results[year] = value
+        if not any(ch.isalpha() for ch in cell_text):
+          ordered_values.append(value)
       col_idx += colspan
 
-    if not results:
+    candidate_results: dict[str, int] = {}
+    if results:
+      if not years or all(year in results for year in years):
+        candidate_results = results
+    if not candidate_results and years and ordered_values:
+      candidate_results = {
+        year: ordered_values[idx]
+        for idx, year in enumerate(years)
+        if idx < len(ordered_values)
+      }
+    if not candidate_results:
       continue
 
     if best_score is None or score > best_score or (score == best_score and section == "current"):
       best_score = score
-      best_results = results
+      best_results = candidate_results
 
   if best_results is not None:
     return best_results
 
   if not debt_like_in_liabilities:
-    years = sorted(set(year_by_col.values()))
     return {year: 0 for year in years}
 
   return {}
@@ -704,4 +985,5 @@ METRIC_EXTRACT = {
   LONG_TERM_DEBT_KEY: extract_long_term_debt,
   SHORT_TERM_DEBT_KEY: extract_short_term_debt,
   STOCKHOLDERS_EQUITY_KEY: extract_stockholders_equity,
+  RETAINED_EARNINGS_KEY: extract_retained_earnings,
 }

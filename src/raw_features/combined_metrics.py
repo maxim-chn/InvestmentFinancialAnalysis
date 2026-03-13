@@ -99,10 +99,13 @@ def merge_company_metric_frames(
         if metric_unit is not None and metric_year not in metric_units_by_year:
           metric_units_by_year[metric_year] = metric_unit
 
+        normalized_metric_value = _normalize_metric_value(metric_value)
         if is_fallback_metric_value(metric_value):
+          if metric_year not in metric_values_by_year:
+            metric_values_by_year[metric_year] = normalized_metric_value
           continue
 
-        metric_values_by_year[metric_year] = _normalize_metric_value(metric_value)
+        metric_values_by_year[metric_year] = normalized_metric_value
         if metric_unit is not None:
           metric_units_by_year[metric_year] = metric_unit
 
@@ -113,8 +116,6 @@ def merge_company_metric_frames(
     metric_units_by_year = metric_units[metric_name]
     for metric_year in sorted(metric_values_by_year.keys()):
       metric_value = metric_values_by_year[metric_year]
-      if is_fallback_metric_value(metric_value):
-        continue
       metric_unit = metric_units_by_year.get(metric_year)
       label = format_metric_column(metric_year, metric_unit)
       metric_row[label] = metric_value
@@ -173,7 +174,7 @@ def combine_metrics(
     )
     if not consolidated_metrics:
       continue
-    payload = {"ticket": company}
+    payload = {"ticker": company}
     payload.update(consolidated_metrics)
     combined_metrics.append((company, json.dumps(payload)))
 

@@ -1,7 +1,11 @@
 import re
 from typing import Iterator, List, Optional, Tuple
 
-from src.raw_features.consolidated_cashflow_statements_rules import CONSOLIDATED_BALANCE_SHEET_RULES, METRIC_EXTRACT
+from src.raw_features.consolidated_cashflow_statements_rules import (
+  CONSOLIDATED_BALANCE_SHEET_RULES,
+  METRIC_EXTRACT,
+  extract_fiscal_years,
+)
 from src.raw_features.constants import CASHFLOW_ERR_TEMPLATE, RAW_FEATURES
 from src.raw_features.original_filing import extract_tables_from_html, read_original_filing
 
@@ -10,6 +14,19 @@ INTEREST_PAID_FACT_MARKERS = (
   'name="us-gaap:interestpaidnet"',
   "name='us-gaap:interestpaid'",
   "name='us-gaap:interestpaidnet'",
+)
+
+TOTAL_REVENUE_FACT_MARKERS = (
+  'name="us-gaap:revenues"',
+  'name="us-gaap:salesrevenuenet"',
+  'name="us-gaap:revenuefromcontractwithcustomerexcludingassessedtax"',
+  'name="us-gaap:revenuefromcontractwithcustomerincludingassessedtax"',
+  'name="us-gaap:totalrevenuesandotherincome"',
+  "name='us-gaap:revenues'",
+  "name='us-gaap:salesrevenuenet'",
+  "name='us-gaap:revenuefromcontractwithcustomerexcludingassessedtax'",
+  "name='us-gaap:revenuefromcontractwithcustomerincludingassessedtax'",
+  "name='us-gaap:totalrevenuesandotherincome'",
 )
 
 CASHFLOW_SELECTION_MARKERS = (
@@ -30,6 +47,32 @@ CASHFLOW_SELECTION_EXCLUSIONS = (
   "condensed statement of cash flows",
   "condensed statements of cash flow",
   "condensed statement of cash flow",
+)
+
+INCOME_STATEMENT_SELECTION_MARKERS = (
+  "consolidated statements of operations",
+  "consolidated statement of operations",
+  "consolidated statements of income",
+  "consolidated statement of income",
+  "consolidated statements of earnings",
+  "consolidated statement of earnings",
+)
+
+INCOME_STATEMENT_ROW_MARKERS = (
+  "total revenue",
+  "total revenues",
+  "net sales",
+  "net revenue",
+  "gross profit",
+  "net income",
+)
+
+INCOME_STATEMENT_SELECTION_EXCLUSIONS = (
+  "condensed statements of operations",
+  "condensed statement of operations",
+  "condensed statements of income",
+  "condensed statement of income",
+  "unaudited",
 )
 
 def is_consolidated_cashflow_statement(table) -> bool:
@@ -108,6 +151,92 @@ def _collect_interest_supplemental_tables(html_text: str, selected_tables: List[
       supplemental.append(serialized)
   return supplemental
 
+def _table_context_text(table, limit: int = 20) -> str:
+  texts: List[str] = []
+  for node in table.find_all_previous(["p", "div"], limit=limit):
+    if node.find("table") is not None:
+      continue
+    text = node.get_text(" ", strip=True)
+    if text:
+      texts.append(text)
+  if not texts:
+    return ""
+  texts.reverse()
+  return " ".join(texts)
+
+def _score_total_revenue_candidate(table) -> int:
+  serialized = str(table)
+  text = (
+    serialized
+    .lower()
+    .replace("’", "'")
+    .replace("‘", "'")
+    .replace("`", "'")
+  )
+  context = _table_context_text(table).lower()
+  combined = f"{context} {text}"
+  score = 0
+
+  for marker in INCOME_STATEMENT_SELECTION_MARKERS:
+    if marker in combined:
+      score += 10
+      break
+
+  for marker in INCOME_STATEMENT_ROW_MARKERS:
+    if marker in text:
+      score += 2
+
+  if any(marker in text for marker in TOTAL_REVENUE_FACT_MARKERS):
+    score += 10
+
+  year_hits = len(set(re.findall(r"\b20\d{2}\b", text)))
+  if year_hits >= 2:
+    score += 2
+  if year_hits >= 3:
+    score += 1
+
+  tr_count = text.count("<tr")
+  if tr_count >= 20:
+    score += 3
+  elif tr_count >= 10:
+    score += 1
+
+  for marker in INCOME_STATEMENT_SELECTION_EXCLUSIONS:
+    if marker in combined:
+      score -= 8
+
+  return score
+
+def _collect_total_revenue_supplemental_tables(html_text: str, selected_tables: List[str]) -> List[str]:
+  from bs4 import BeautifulSoup
+
+  soup = BeautifulSoup(html_text, "html.parser")
+  selected_table_fragments: set[str] = set()
+  for selected_html in selected_tables:
+    selected_soup = BeautifulSoup(selected_html, "html.parser")
+    for selected_table in selected_soup.find_all("table"):
+      selected_table_fragments.add(str(selected_table))
+
+  ranked_candidates: List[Tuple[int, str]] = []
+  for table in soup.find_all("table"):
+    serialized = str(table)
+    if serialized in selected_table_fragments:
+      continue
+    score = _score_total_revenue_candidate(table)
+    if score <= 0:
+      continue
+    ranked_candidates.append((score, serialized))
+
+  ranked_candidates.sort(key=lambda item: item[0], reverse=True)
+  selected: List[str] = []
+  for _score, candidate in ranked_candidates:
+    if candidate in selected:
+      continue
+    selected.append(candidate)
+    if len(selected) >= 16:
+      break
+  return selected
+
 def read_raw_cashflow_statements(inputs: Iterator[Tuple[str, str]]) -> Iterator[Tuple[str, str]]:
   try:
     for company, path in inputs:
@@ -131,6 +260,7 @@ def read_raw_cashflow_statements(inputs: Iterator[Tuple[str, str]]) -> Iterator[
 
       selected_tables = [selected_table]
       selected_tables.extend(_collect_interest_supplemental_tables(html_text, selected_tables))
+      selected_tables.extend(_collect_total_revenue_supplemental_tables(html_text, selected_tables))
       yield company, "".join(selected_tables)
   except Exception as e:
     yield company, f"{CASHFLOW_ERR_TEMPLATE} -- unexpected exception during Consolidated Cash Flow Statements read -- {e}"
@@ -147,13 +277,34 @@ def extract_metrics(inputs: Iterator[Tuple[str, str]]) -> Iterator[Tuple[str, st
         yield company, f"{CASHFLOW_ERR_TEMPLATE} -- failed to parse Consolidated Cash Flow Statements HTML"
         continue
 
+      primary_table = tables[0]
+      net_income = METRIC_EXTRACT[RAW_FEATURES.NET_INCOME.value](primary_table)
       metrics = {
-        RAW_FEATURES.NET_INCOME.value: {},
+        RAW_FEATURES.NET_INCOME.value: dict(net_income) if net_income else {},
         RAW_FEATURES.INTEREST_EXPENSE.value: {},
         RAW_FEATURES.TAX_EXPENSE.value: {},
+        RAW_FEATURES.TOTAL_REVENUE.value: {},
       }
+
+      # Net income must come from the primary cashflow table only; supplemental
+      # tables often include multi-year summary data that pollutes year windows.
+      all_years = sorted(metrics[RAW_FEATURES.NET_INCOME.value].keys())
+      if not all_years:
+        all_years = extract_fiscal_years(primary_table)
+      if not all_years:
+        yield company, (
+          f"{CASHFLOW_ERR_TEMPLATE} -- failed to detect fiscal years in Consolidated Cash Flow Statements"
+        )
+        continue
+      target_years = set(all_years)
+
+      total_revenue_candidates: List[dict[str, int]] = []
       for table in tables:
-        for metric_name, extractor in METRIC_EXTRACT.items():
+        for metric_name in (
+          RAW_FEATURES.INTEREST_EXPENSE.value,
+          RAW_FEATURES.TAX_EXPENSE.value,
+        ):
+          extractor = METRIC_EXTRACT[metric_name]
           metric_values = extractor(table)
           if not metric_values:
             continue
@@ -163,18 +314,48 @@ def extract_metrics(inputs: Iterator[Tuple[str, str]]) -> Iterator[Tuple[str, st
           for year, value in metric_values.items():
             if year not in metrics[metric_name]:
               metrics[metric_name][year] = value
-      all_years = sorted({
-        year
-        for metric in metrics.values()
-        for year in metric.keys()
-      })
 
-      # Keep the pipeline moving when interest expense is not disclosed/extractable.
-      interest_metric = metrics[RAW_FEATURES.INTEREST_EXPENSE.value]
-      if all_years:
+        total_revenue_values = METRIC_EXTRACT[RAW_FEATURES.TOTAL_REVENUE.value](table)
+        if total_revenue_values:
+          total_revenue_candidates.append(dict(total_revenue_values))
+
+      if total_revenue_candidates:
+        def _revenue_candidate_rank(values: dict[str, int]) -> tuple[int, int, int]:
+          overlap = len(target_years & set(values.keys()))
+          max_year = max(
+            (int(year) for year in values.keys() if str(year).isdigit()),
+            default=0,
+          )
+          return overlap, len(values), max_year
+
+        ranked_revenue_candidates = sorted(
+          total_revenue_candidates,
+          key=_revenue_candidate_rank,
+          reverse=True,
+        )
+        merged_total_revenue: dict[str, int] = {}
+        for candidate in ranked_revenue_candidates:
+          for year in all_years:
+            if year in candidate and year not in merged_total_revenue:
+              merged_total_revenue[year] = candidate[year]
+        if merged_total_revenue:
+          metrics[RAW_FEATURES.TOTAL_REVENUE.value] = merged_total_revenue
+        else:
+          metrics[RAW_FEATURES.TOTAL_REVENUE.value] = ranked_revenue_candidates[0]
+
+      # Keep the pipeline moving when cashflow metrics are not disclosed/extractable.
+      for fallback_metric_name in (
+        RAW_FEATURES.NET_INCOME.value,
+        RAW_FEATURES.INTEREST_EXPENSE.value,
+        RAW_FEATURES.TAX_EXPENSE.value,
+        RAW_FEATURES.TOTAL_REVENUE.value,
+      ):
+        fallback_metric = metrics[fallback_metric_name]
+        if not all_years:
+          continue
         for year in all_years:
-          if year not in interest_metric or interest_metric[year] is None:
-            interest_metric[year] = "N/A"
+          if year not in fallback_metric or fallback_metric[year] is None:
+            fallback_metric[year] = "N/A"
 
       missing_value = False
       for metric_name, metric_values in metrics.items():

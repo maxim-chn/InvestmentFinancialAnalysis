@@ -20,6 +20,7 @@ class RAW_FEATURES(Enum):
   LONG_TERM_DEBT = "long_term_debt"
   INTEREST_EXPENSE = "interest_expense"
   NET_INCOME = "net_income"
+  RETAINED_EARNINGS = "retained_earnings"
   SHORT_TERM_DEBT = "short_term_debt"
   STOCKHOLDERS_EQUITY = "stockholders_equity"
   TAX_EXPENSE = "tax_expense"

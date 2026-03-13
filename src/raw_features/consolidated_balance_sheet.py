@@ -1,7 +1,12 @@
 import re
 from typing import Iterator, List, Optional, Tuple
 
-from src.raw_features.consolidated_balance_sheet_rules import CONSOLIDATED_BALANCE_SHEET_RULES, METRIC_EXTRACT, extract_units
+from src.raw_features.consolidated_balance_sheet_rules import (
+  CONSOLIDATED_BALANCE_SHEET_RULES,
+  METRIC_EXTRACT,
+  extract_fiscal_years,
+  extract_units,
+)
 from src.raw_features.constants import BALANCE_SHEET_ERR_TEMPLATE, RAW_FEATURES
 from src.raw_features.original_filing import extract_tables_from_html, read_original_filing
 
@@ -23,6 +28,14 @@ BALANCE_SHEET_SELECTION_MARKERS = (
   "liabilities and stockholders deficit",
   "liabilities and shareholders' deficit",
   "liabilities and shareholders deficit",
+  "liabilities and stockholders' deficit equity",
+  "liabilities and stockholders deficit equity",
+  "liabilities and shareholders' deficit equity",
+  "liabilities and shareholders deficit equity",
+  "liabilities and stockholders' equity deficit",
+  "liabilities and stockholders equity deficit",
+  "liabilities and shareholders' equity deficit",
+  "liabilities and shareholders equity deficit",
   "stockholders' equity",
   "stockholders equity",
   "shareholders' equity",
@@ -31,6 +44,14 @@ BALANCE_SHEET_SELECTION_MARKERS = (
   "stockholders deficit",
   "shareholders' deficit",
   "shareholders deficit",
+  "stockholders' deficit equity",
+  "stockholders deficit equity",
+  "shareholders' deficit equity",
+  "shareholders deficit equity",
+  "stockholders' equity deficit",
+  "stockholders equity deficit",
+  "shareholders' equity deficit",
+  "shareholders equity deficit",
   "total liabilities",
   "total current assets",
   "total current liabilities",
@@ -137,24 +158,26 @@ def extract_metrics(inputs: Iterator[Tuple[str, str]]) -> Iterator[Tuple[str, st
         RAW_FEATURES.CURRENT_LIABILITIES.value: METRIC_EXTRACT[RAW_FEATURES.CURRENT_LIABILITIES.value](table),
         RAW_FEATURES.SHORT_TERM_DEBT.value: METRIC_EXTRACT[RAW_FEATURES.SHORT_TERM_DEBT.value](table),
         RAW_FEATURES.LONG_TERM_DEBT.value: METRIC_EXTRACT[RAW_FEATURES.LONG_TERM_DEBT.value](table),
+        RAW_FEATURES.RETAINED_EARNINGS.value: METRIC_EXTRACT[RAW_FEATURES.RETAINED_EARNINGS.value](table),
         RAW_FEATURES.STOCKHOLDERS_EQUITY.value: METRIC_EXTRACT[RAW_FEATURES.STOCKHOLDERS_EQUITY.value](table),
         RAW_FEATURES.TOTAL_ASSETS.value: METRIC_EXTRACT[RAW_FEATURES.TOTAL_ASSETS.value](table),
       }
       units_by_year = extract_units(table)
       all_years = sorted({year for metric in metrics.values() for year in metric.keys()})
-      missing_value = False
-      for metric_name, metric_values in metrics.items():
+      if not all_years:
+        all_years = extract_fiscal_years(table)
+      if not all_years:
+        yield company, (
+          f"{BALANCE_SHEET_ERR_TEMPLATE} -- failed to detect fiscal years in Consolidated Balance Sheet"
+        )
+        continue
+
+      # Keep pipeline continuity when metrics are not disclosed/extractable.
+      for metric_values in metrics.values():
         for year in all_years:
           if year not in metric_values or metric_values[year] is None:
-            yield company, (
-              f"{BALANCE_SHEET_ERR_TEMPLATE} -- fiscal year {year} -- failed to extract metric {metric_name}"
-            )
-            missing_value = True
-            break
-        if missing_value:
-          break
-      if missing_value:
-        continue
+            metric_values[year] = "N/A"
+
       df = pd.DataFrame.from_dict(metrics, orient="index").reindex(columns=all_years)
       if units_by_year:
         labeled_years = {

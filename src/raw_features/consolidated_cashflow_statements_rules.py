@@ -1,9 +1,28 @@
-from __future__ import annotations
-
 import re
 from typing import Optional
 
 from src.raw_features.constants import RAW_FEATURES
+
+TOTAL_REVENUE_FACT_MARKERS = (
+  'name="us-gaap:revenues"',
+  'name="us-gaap:salesrevenuenet"',
+  'name="us-gaap:revenuefromcontractwithcustomerexcludingassessedtax"',
+  'name="us-gaap:revenuefromcontractwithcustomerincludingassessedtax"',
+  'name="us-gaap:totalrevenuesandotherincome"',
+  "name='us-gaap:revenues'",
+  "name='us-gaap:salesrevenuenet'",
+  "name='us-gaap:revenuefromcontractwithcustomerexcludingassessedtax'",
+  "name='us-gaap:revenuefromcontractwithcustomerincludingassessedtax'",
+  "name='us-gaap:totalrevenuesandotherincome'",
+)
+
+TOTAL_REVENUE_FACT_NAMES = (
+  "us-gaap:revenues",
+  "us-gaap:salesrevenuenet",
+  "us-gaap:revenuefromcontractwithcustomerexcludingassessedtax",
+  "us-gaap:revenuefromcontractwithcustomerincludingassessedtax",
+  "us-gaap:totalrevenuesandotherincome",
+)
 
 MANDATORY_CASHFLOW_TERMS = [
   "investing activities",
@@ -89,6 +108,15 @@ def _year_headers(table) -> list[str]:
           years.append(match)
     if len(years) >= 2:
       return years
+  return []
+
+def extract_fiscal_years(table) -> list[str]:
+  headers = _year_headers(table)
+  if headers:
+    return headers
+  year_by_col = _year_by_column(table)
+  if year_by_col:
+    return sorted(set(year_by_col.values()))
   return []
 
 
@@ -217,6 +245,93 @@ def _is_tax_expense_row(row_text: str) -> bool:
     return True
   return False
 
+def _is_total_revenue_row(row_text: str) -> bool:
+  normalized = re.sub(r"\s+", " ", row_text).strip()
+  if not normalized:
+    return False
+  if "total revenues and other income" in normalized:
+    return True
+  if any(
+    marker in normalized
+    for marker in (
+      "cost of revenue",
+      "cost of revenues",
+      "cost of sales",
+      "cost of goods sold",
+      "deferred revenue",
+      "unearned revenue",
+      "other revenue",
+      "other revenues",
+      "non-revenue",
+      "segment revenue",
+      "segment revenues",
+      "per share",
+      "percent of net sales",
+      "percentage of net sales",
+      "as a percent of net sales",
+      "% of net sales",
+    )
+  ):
+    return False
+  if any(
+    marker in normalized
+    for marker in (
+      "total revenue",
+      "total revenues",
+      "total net revenue",
+      "total net revenues",
+      "total net sales",
+      "net revenue",
+      "net revenues",
+      "net sales",
+      "revenue, net",
+      "revenues, net",
+      "sales revenue",
+      "sales revenues",
+    )
+  ):
+    return True
+  if re.fullmatch(r"revenues?", normalized):
+    return True
+  return False
+
+def _is_gross_profit_row(row_text: str) -> bool:
+  if "gross profit" not in row_text:
+    return False
+  if any(
+    marker in row_text
+    for marker in (
+      "gross profit margin",
+      "percentage",
+      "percent",
+      "% of",
+    )
+  ):
+    return False
+  return True
+
+def _is_cost_of_revenue_row(row_text: str) -> bool:
+  if any(
+    marker in row_text
+    for marker in (
+      "cost of revenue",
+      "cost of revenues",
+      "cost of goods sold",
+      "cost of sales",
+    )
+  ):
+    if any(
+      marker in row_text
+      for marker in (
+        "percentage",
+        "percent",
+        "% of",
+      )
+    ):
+      return False
+    return True
+  return False
+
 def _is_tax_paid_row(row_text: str) -> bool:
   if "tax" not in row_text:
     return False
@@ -233,6 +348,21 @@ def _is_tax_paid_row(row_text: str) -> bool:
     return True
   if "tax paid" in row_text and "payroll" not in row_text:
     return True
+  return False
+
+def _is_deferred_tax_row(row_text: str) -> bool:
+  if "deferred income tax" in row_text or "deferred income taxes" in row_text:
+    return True
+  if "deferred tax" in row_text:
+    return not any(
+      marker in row_text
+      for marker in (
+        "assets",
+        "liabilities",
+        "asset",
+        "liability",
+      )
+    )
   return False
 
 
@@ -274,13 +404,17 @@ def extract_net_income(table) -> dict[str, int]:
           ordered_values.append(value)
       col_idx += colspan
     if results:
-      return results
+      if not years:
+        return results
+      if all(year in results for year in years):
+        return results
     if years and ordered_values:
       return {
         year: ordered_values[idx]
         for idx, year in enumerate(years)
         if idx < len(ordered_values)
       }
+    return results
   return {}
 
 def _extract_metric_from_rows(table, row_matcher) -> dict[str, int]:
@@ -312,14 +446,127 @@ def _extract_metric_from_rows(table, row_matcher) -> dict[str, int]:
           ordered_values.append(value)
       col_idx += colspan
     if results:
-      return results
+      if not years:
+        return results
+      if all(year in results for year in years):
+        return results
     if years and ordered_values:
       return {
         year: ordered_values[idx]
         for idx, year in enumerate(years)
         if idx < len(ordered_values)
       }
+    # Some filings include heading rows (e.g., "Revenue, net") without
+    # numeric cells before the actual data row. Keep scanning in that case.
+    if results:
+      return results
   return {}
+
+def _extract_metric_from_fact_markers(table, fact_markers: tuple[str, ...]) -> dict[str, int]:
+  year_by_col = _year_by_column(table)
+  years = _year_headers(table)
+  if not year_by_col:
+    year_by_col = {}
+  if not year_by_col and not years:
+    return {}
+  for row in table.find_all("tr"):
+    row_html = str(row).lower()
+    if not any(marker in row_html for marker in fact_markers):
+      continue
+    results: dict[str, int] = {}
+    ordered_values: list[int] = []
+    col_idx = 0
+    for cell in row.find_all(["td", "th"]):
+      colspan = int(cell.get("colspan", 1))
+      cell_text = cell.get_text(" ", strip=True)
+      value = _parse_number(cell_text)
+      if value is not None:
+        if _cell_is_negative(cell, cell_text):
+          value = -abs(value)
+        for offset in range(colspan):
+          year = year_by_col.get(col_idx + offset)
+          if year and year not in results:
+            results[year] = value
+        if not any(ch.isalpha() for ch in cell_text):
+          ordered_values.append(value)
+      col_idx += colspan
+    if results:
+      if not years:
+        return results
+      if all(year in results for year in years):
+        return results
+    if years and ordered_values:
+      return {
+        year: ordered_values[idx]
+        for idx, year in enumerate(years)
+        if idx < len(ordered_values)
+      }
+    if results:
+      return results
+  return {}
+
+def _extract_attr(attrs: str, attr_name: str) -> Optional[str]:
+  pattern = rf"""\b{re.escape(attr_name)}\s*=\s*(['"])(.*?)\1"""
+  match = re.search(pattern, attrs, flags=re.IGNORECASE | re.DOTALL)
+  if not match:
+    return None
+  return match.group(2)
+
+def _extract_metric_from_inline_xbrl_context(
+  table,
+  fact_names: tuple[str, ...],
+) -> dict[str, int]:
+  table_html = str(table)
+  fact_names_set = set(fact_names)
+  matches = re.finditer(
+    r"<ix:nonfraction\b(?P<attrs>[^>]*)>(?P<value>.*?)</ix:nonfraction>",
+    table_html,
+    flags=re.IGNORECASE | re.DOTALL,
+  )
+
+  results: dict[str, int] = {}
+  for match in matches:
+    attrs = match.group("attrs")
+    fact_name = _extract_attr(attrs, "name")
+    if fact_name is None or fact_name.lower() not in fact_names_set:
+      continue
+
+    contextref = _extract_attr(attrs, "contextref")
+    if contextref is None:
+      continue
+    context_lower = contextref.lower()
+    # Exclude dimensional segment/member rows; we need consolidated totals.
+    if "axis" in context_lower or "member" in context_lower:
+      continue
+
+    year = None
+    range_match = re.search(r"d(20\d{2})\d{4}-(20\d{2})\d{4}", contextref, flags=re.IGNORECASE)
+    if range_match is not None:
+      # For duration contexts, use the period end year.
+      year = range_match.group(2)
+    if year is None:
+      year_match = re.search(r"(?:^|_)(20\d{2})[-_]", contextref)
+      if year_match is None:
+        year_match = re.search(r"\b(20\d{2})\b", contextref)
+      if year_match is None:
+        continue
+      year = year_match.group(1)
+
+    raw_value = re.sub(r"<[^>]+>", "", match.group("value"))
+    value = _parse_number(raw_value)
+    if value is None:
+      continue
+
+    sign = _extract_attr(attrs, "sign")
+    if sign == "-":
+      value = -abs(value)
+
+    # Keep the larger absolute candidate if duplicates exist for the same year.
+    if year in results and abs(results[year]) >= abs(value):
+      continue
+    results[year] = value
+
+  return results
 
 def extract_interest_expense(table) -> Optional[dict[str, int]]:
   interest_expense = _extract_metric_from_rows(table, _is_interest_expense_row)
@@ -341,6 +588,43 @@ def extract_tax_expense(table) -> Optional[dict[str, int]]:
   if tax_paid:
     return tax_paid
 
+  deferred_tax = _extract_metric_from_rows(table, _is_deferred_tax_row)
+  if deferred_tax:
+    return deferred_tax
+
+  return None
+
+def _derive_total_revenue_from_components(table) -> Optional[dict[str, int]]:
+  gross_profit = _extract_metric_from_rows(table, _is_gross_profit_row)
+  if not gross_profit:
+    return None
+  cost_of_revenue = _extract_metric_from_rows(table, _is_cost_of_revenue_row)
+  if not cost_of_revenue:
+    return None
+
+  derived_total_revenue: dict[str, int] = {}
+  for year, gross_value in gross_profit.items():
+    if year not in cost_of_revenue:
+      continue
+    derived_total_revenue[year] = gross_value + abs(cost_of_revenue[year])
+
+  if not derived_total_revenue:
+    return None
+  return derived_total_revenue
+
+def extract_total_revenue(table) -> Optional[dict[str, int]]:
+  total_revenue = _extract_metric_from_fact_markers(table, TOTAL_REVENUE_FACT_MARKERS)
+  if total_revenue:
+    return total_revenue
+  total_revenue = _extract_metric_from_inline_xbrl_context(table, TOTAL_REVENUE_FACT_NAMES)
+  if total_revenue:
+    return total_revenue
+  total_revenue = _extract_metric_from_rows(table, _is_total_revenue_row)
+  if total_revenue:
+    return total_revenue
+  total_revenue = _derive_total_revenue_from_components(table)
+  if total_revenue:
+    return total_revenue
   return None
 
 
@@ -350,4 +634,5 @@ METRIC_EXTRACT = {
   RAW_FEATURES.NET_INCOME.value: extract_net_income,
   RAW_FEATURES.INTEREST_EXPENSE.value: extract_interest_expense,
   RAW_FEATURES.TAX_EXPENSE.value: extract_tax_expense,
+  RAW_FEATURES.TOTAL_REVENUE.value: extract_total_revenue,
 }

@@ -1,8 +1,10 @@
 __pycache__/
 *.py[cod]
 
-assets/filings_10k/
-1assets/filings_10k/README.md
+assets/filings_10k/*
+!assets/filings_10k/README.md
+
+bash_scripts
 
 logs/*
 !logs/README.md
