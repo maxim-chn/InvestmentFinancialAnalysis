@@ -1,11 +1,38 @@
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import col, from_json, when, lit, round, coalesce
+import pyspark.sql.functions as F
 from pyspark.sql.types import StructType, StructField, StringType, FloatType, IntegerType, MapType
+from src.raw_features.logger import log_message
 
 # --- CONFIGURATION CONSTANTS ---
 KAFKA_BROKER = "localhost:9092"
 INPUT_TOPIC = "raw_features"  # Update this to match your actual Kafka topic
 
+def process_batch(df: DataFrame, batch_id: int):
+    """
+    Processes each micro-batch to log NaN sources and write to console.
+    """
+    # Log NaN sources
+    nan_df = df.filter(F.isnan(col("Z_Score")) | col("Z_Score").isNull())
+    for row in nan_df.select("ticker", "year", "X1", "X2", "X3", "X4", "X5").collect():
+        log_message(
+            f"NaN Z_Score for ticker: {row['ticker']}, year: {row['year']}. "
+            f"X1={row['X1']}, X2={row['X2']}, X3={row['X3']}, X4={row['X4']}, X5={row['X5']}",
+            log_name="AltmanZPrimeETL",
+            level="WARN"
+        )
+
+    # Prepare and show output
+    df.select(
+        col("ticker").alias("Company"),
+        "year",
+        "Z_Score",
+        "Health_Zone",
+        "ebit",
+        "total_liabilities",
+        lit(None).alias("performance"),
+        lit(False).alias("is_anomaly")
+    ).withColumn("Company", F.upper(col("Company"))).show(truncate=False)
 def get_schema() -> StructType:
     """
     Defines the schema for the incoming raw JSON data from the parser.
@@ -74,7 +101,7 @@ def calculate_altman_zprime(df: DataFrame) -> DataFrame:
     df = df.withColumn("X1", (col("current_assets") - col("current_liabilities")) / col("total_assets")) \
            .withColumn("X2", col("retained_earnings") / col("total_assets")) \
            .withColumn("X3", col("ebit") / col("total_assets")) \
-           .withColumn("X4", col("stockholders_equity") / col("total_liabilities")) \
+           .withColumn("X4", when(col("total_liabilities") != 0, col("stockholders_equity") / col("total_liabilities")).otherwise(None)) \
            .withColumn("X5", col("total_revenue") / col("total_assets"))
 
     # Apply the Z'-Score formula with adjusted weights
@@ -102,6 +129,11 @@ def calculate_altman_zprime(df: DataFrame) -> DataFrame:
 if __name__ == "__main__":
     print("Starting Altman Z'-Score Stream Processor...")
 
+    # IMPORTANT: Set the root directory for the logger to work.
+    # You can uncomment and set the path here, or set it as an environment variable.
+    # import os
+    # os.environ['RAW_FEATURES_SPARK_PUBLISHER_ROOT'] = '/home/linuxu/Dima/InvestmentFinancialAnalysis'
+
     spark = SparkSession.builder \
         .appName("Altman_Z_Prime_ETL") \
         .master("local[*]") \
@@ -125,13 +157,10 @@ if __name__ == "__main__":
     clean_stream = normalize_and_engineer_features(parsed_stream)
     scored_stream = calculate_altman_zprime(clean_stream)
 
-    # 3. Output results to console
-    # Using 'append' mode since we are processing raw events, not aggregating yet
-    query = scored_stream.select("ticker", "year", "Z_Score", "Health_Zone", "ebit", "total_liabilities") \
-        .writeStream \
+    # 3. Process each batch to log NaNs and write to console
+    query = scored_stream.writeStream \
+        .foreachBatch(process_batch) \
         .outputMode("append") \
-        .format("console") \
-        .option("truncate", "false") \
         .start()
     
     query.awaitTermination()

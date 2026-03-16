@@ -9,7 +9,7 @@ def get_required_env_var(name: str) -> str:
 
 BASE_DIR = get_required_env_var("RAW_FEATURES_SPARK_PUBLISHER_ROOT")
 LOGS_DIR = os.path.normpath(os.path.join(BASE_DIR, "logs"))
-LOG_PATH = os.path.join(LOGS_DIR, "raw_features_spark_publisher.log")
+LOG_PATH = os.path.join(LOGS_DIR, "main.log")
 _LOG_INITIALIZED = False
 
 
@@ -23,9 +23,9 @@ def _initialize_log() -> None:
   _LOG_INITIALIZED = True
 
 
-def log_message(message: str, level: str = "INFO") -> None:
+def log_message(message: str, log_name: str = "RawFeaturesSparkPublisher", level: str = "INFO") -> None:
   _initialize_log()
   timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-  line = f"{timestamp} -- RawFeaturesSparkPublisher -- {level} -- {message}\n"
+  line = f"{timestamp} -- {log_name} -- {level} -- {message}\n"
   with open(LOG_PATH, "a", encoding="utf-8") as f:
     f.write(line)
