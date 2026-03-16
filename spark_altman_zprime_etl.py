@@ -1,8 +1,33 @@
 from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, from_json, when, lit, round, coalesce
 import pyspark.sql.functions as F
 from pyspark.sql.types import StructType, StructField, StringType, FloatType, IntegerType, MapType
+from pyspark.sql.window import Window
+from pyspark.sql.functions import col, from_json, when, lit, round, coalesce, avg, stddev, abs
 from src.raw_features.logger import log_message
+
+def enrich_with_analytics(df: DataFrame) -> DataFrame:
+    """
+    Advanced Analytics Step:
+    Calculates dynamic sector averages, standard deviations, and assigns Health Zones.
+    """
+    stats_window = Window.partitionBy()
+
+    # 1. Calculate Statistics (Avg & StdDev) per Year
+    df_stats = df \
+        .withColumn("Yearly_Avg_Z", round(avg("Z_Score").over(stats_window), 2)) \
+        .withColumn("Yearly_StdDev", round(stddev("Z_Score").over(stats_window), 2)) \
+        .na.fill(0.0, ["Yearly_StdDev"])
+
+    # 2. Apply Logic: Benchmarking, Anomaly Detection, and Classification
+    return df_stats.withColumn(
+        "performance",
+        when(col("Z_Score") > col("Yearly_Avg_Z"), "Outperforming")
+        .otherwise("Underperforming")
+    ).withColumn(
+        "is_anomaly",
+        when(abs(col("Z_Score") - col("Yearly_Avg_Z")) > (lit(2) * col("Yearly_StdDev")), "Yes")
+        .otherwise("No")
+    )
 
 # --- CONFIGURATION CONSTANTS ---
 KAFKA_BROKER = "localhost:9092"
@@ -19,19 +44,23 @@ def process_batch(df: DataFrame, batch_id: int):
             f"NaN Z_Score for ticker: {row['ticker']}, year: {row['year']}. "
             f"X1={row['X1']}, X2={row['X2']}, X3={row['X3']}, X4={row['X4']}, X5={row['X5']}",
             log_name="AltmanZPrimeETL",
-            level="WARN"
+            level="WARNING"
         )
 
+    # Clean the data by removing rows with NaN or null Z_Score
+    cleaned_df = df.filter(~(F.isnan(col("Z_Score")) | col("Z_Score").isNull()))
+
+    # Enrich with analytics on cleaned data
+    enriched_df = enrich_with_analytics(cleaned_df)
+
     # Prepare and show output
-    df.select(
+    enriched_df.select(
         col("ticker").alias("Company"),
         "year",
         "Z_Score",
         "Health_Zone",
-        "ebit",
-        "total_liabilities",
-        lit(None).alias("performance"),
-        lit(False).alias("is_anomaly")
+        "performance",
+        "is_anomaly"
     ).withColumn("Company", F.upper(col("Company"))).show(truncate=False)
 def get_schema() -> StructType:
     """
