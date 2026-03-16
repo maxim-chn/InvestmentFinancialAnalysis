@@ -13,15 +13,18 @@ selected_component := $(firstword $(MAKECMDGOALS))
 
 .DEFAULT_GOAL := help
 
-.PHONY: help raw_features process do_export do_import
+.PHONY: help raw_features process do_export do_import run-altman-etl run-altman-zprime-etl run-producer
 
 help:
-	@echo "Usage: make raw_features <action> [options]"
+	@echo "Usage: make <target> [options]"
 	@echo ""
-	@echo "Component:"
-	@echo "  raw_features            Supported component."
+	@echo "Targets:"
+	@echo "  raw_features            Supported component. See actions below."
+	@echo "  run-altman-etl          Run spark_altman_etl.py."
+	@echo "  run-altman-zprime-etl   Run spark_altman_zprime_etl.py."
+	@echo "  run-producer            Run produser.py."
 	@echo ""
-	@echo "Actions (require component target first):"
+	@echo "Actions for 'raw_features':"
 	@echo "  process                 Run raw_features_spark_publisher.py."
 	@echo "                          Optional: company=<ticker> (single-company mode)."
 	@echo "  do_export               Zip assets dir to assets export archive."
@@ -41,6 +44,9 @@ help:
 	@echo "  make raw_features process company=aaoi"
 	@echo "  make raw_features do_export"
 	@echo "  make raw_features do_import"
+	@echo "  make run-altman-etl"
+	@echo "  make run-altman-zprime-etl"
+	@echo "  make run-producer"
 
 raw_features:
 	@if [ "$(selected_component)" != "$(supported_component)" ]; then \
@@ -111,6 +117,17 @@ do_import: raw_features
 			unzip -qo "$(RAW_FEATURES_SPARK_PUBLISHER_ASSETS_EXPORT)" -d "$(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)"; \
 			echo "INFO: assets imported to $(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)"; \
 		fi
+
+run-altman-etl:
+	RAW_FEATURES_SPARK_PUBLISHER_ROOT="$(RAW_FEATURES_SPARK_PUBLISHER_ROOT)" \
+	spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0 spark_altman_etl.py
+
+run-altman-zprime-etl:
+	RAW_FEATURES_SPARK_PUBLISHER_ROOT="$(RAW_FEATURES_SPARK_PUBLISHER_ROOT)" \
+	spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0 spark_altman_zprime_etl.py
+
+run-producer:
+	python3 produser.py
 
 %:
 	@echo "ERROR: unsupported component '$@'. Supported component: $(supported_component)"
