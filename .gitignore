@@ -3,6 +3,7 @@ __pycache__/
 
 assets/filings_10k/*
 !assets/filings_10k/README.md
+!assets/filings_10k/price_cache.json
 
 bash_scripts
 

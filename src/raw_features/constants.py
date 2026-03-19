@@ -15,6 +15,7 @@ RAW_TABLES_DIR = os.path.join(BASE_DIR, "assets", "raw_html_tables")
 TARGET_YEAR_PREFIX_TEMPLATE = "filing-%s-"
 
 class RAW_FEATURES(Enum):
+  COMMON_STOCK_UNITS = "common_stock_units"
   CURRENT_ASSETS = "current_assets"
   CURRENT_LIABILITIES = "current_liabilities"
   LONG_TERM_DEBT = "long_term_debt"
