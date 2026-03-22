@@ -1,7 +1,9 @@
+import html
 import re
 from typing import Optional
 from src.raw_features.constants import RAW_FEATURES
 
+COMMON_STOCK_UNITS_KEY = RAW_FEATURES.COMMON_STOCK_UNITS.value
 CURRENT_ASSETS_KEY = RAW_FEATURES.CURRENT_ASSETS.value
 CURRENT_LIABILITIES_KEY = RAW_FEATURES.CURRENT_LIABILITIES.value
 TOTAL_ASSETS_KEY = RAW_FEATURES.TOTAL_ASSETS.value
@@ -240,11 +242,7 @@ def _detect_units(text: str) -> Optional[str]:
       return f"$ in {unit}"
   return None
 
-def extract_units(table) -> dict[str, str]:
-  year_by_col = _year_by_column(table)
-  if not year_by_col:
-    return {}
-
+def _table_header_candidates(table) -> list[str]:
   rows = list(table.find_all("tr"))
   candidates: list[str] = []
 
@@ -288,12 +286,266 @@ def extract_units(table) -> dict[str, str]:
       if prev_row_text:
         candidates.append(prev_row_text)
 
+  return candidates
+
+def extract_units(table) -> dict[str, str]:
+  year_by_col = _year_by_column(table)
+  if not year_by_col:
+    return {}
+
+  candidates = _table_header_candidates(table)
   unit = _detect_units(" ".join(candidates))
   if unit is None:
     return {}
 
   years = sorted(set(year_by_col.values()))
   return {year: unit for year in years}
+
+def _detect_share_scale(table) -> int:
+  normalized = _normalize_metric_text(" ".join(_table_header_candidates(table)))
+  if normalized == "":
+    return 1
+  if "except share" in normalized or "except shares" in normalized:
+    return 1
+  if re.search(r"(?:^|\W)(?:dollars?|usd|\$)\s*(?:in\s*)?(thousands|millions|billions)\b", normalized):
+    return 1
+
+  match = re.search(r"\bin\s+(thousands|millions|billions)\b", normalized)
+  if not match:
+    return 1
+
+  unit = match.group(1)
+  if unit == "thousands":
+    return 1000
+  if unit == "millions":
+    return 1000000
+  if unit == "billions":
+    return 1000000000
+  return 1
+
+def _strip_html_tags(text: str) -> str:
+  stripped = re.sub(r"<[^>]+>", " ", text)
+  return html.unescape(re.sub(r"\s+", " ", stripped)).strip()
+
+def _parse_share_count_value(text: str) -> Optional[int]:
+  normalized = _normalize_metric_text(_strip_html_tags(text))
+  if normalized == "":
+    return None
+  if normalized in ("no", "none"):
+    return 0
+  if re.fullmatch(r"[—–-]+", normalized):
+    return 0
+  match = re.search(r"\d[\d,]*", normalized)
+  if match is None:
+    return None
+  return int(match.group(0).replace(",", ""))
+
+def _apply_fact_scale(value: int, scale: int) -> int:
+  if scale > 0:
+    return value * (10 ** scale)
+  if scale < 0:
+    return int(round(value / (10 ** abs(scale))))
+  return value
+
+def _is_allowed_common_stock_context(dimensions: tuple[str, ...]) -> bool:
+  if not dimensions:
+    return True
+  return all(
+    "classofstockaxis" in dimension or "classesofsharecapitalaxis" in dimension
+    for dimension in dimensions
+  )
+
+def _parse_xbrl_contexts(html_text: str) -> dict[str, tuple[str, tuple[str, ...]]]:
+  contexts: dict[str, tuple[str, tuple[str, ...]]] = {}
+  context_pattern = re.compile(
+    r"<(?:xbrli:)?context\b[^>]*\bid=\"([^\"]+)\"[^>]*>(.*?)</(?:xbrli:)?context>",
+    re.IGNORECASE | re.DOTALL,
+  )
+  instant_pattern = re.compile(
+    r"<(?:xbrli:)?instant>\s*(\d{4})-\d{2}-\d{2}\s*</(?:xbrli:)?instant>",
+    re.IGNORECASE,
+  )
+  dimension_pattern = re.compile(
+    r"<(?:xbrldi:)?explicitMember\b[^>]*\bdimension=\"([^\"]+)\"",
+    re.IGNORECASE,
+  )
+
+  for context_id, body in context_pattern.findall(html_text):
+    instant_match = instant_pattern.search(body)
+    if instant_match is None:
+      continue
+    dimensions = tuple(
+      dimension.lower()
+      for dimension in dimension_pattern.findall(body)
+    )
+    contexts[context_id] = (instant_match.group(1), dimensions)
+
+  return contexts
+
+def _extract_xbrl_common_stock_units(
+  html_text: str,
+  fact_names: tuple[str, ...]
+) -> dict[str, int]:
+  if html_text.strip() == "":
+    return {}
+
+  contexts = _parse_xbrl_contexts(html_text)
+  if not contexts:
+    return {}
+
+  accepted_fact_names = {name.lower() for name in fact_names}
+  values_by_year: dict[str, dict[str, int]] = {}
+
+  for fact_name in accepted_fact_names:
+    fact_pattern = re.compile(
+      rf"<(?:ix:)?nonFraction\b([^>]*)\bname=\"{re.escape(fact_name)}\"([^>]*)>(.*?)</(?:ix:)?nonFraction>",
+      re.IGNORECASE | re.DOTALL,
+    )
+    for before_attrs, after_attrs, raw_value in fact_pattern.findall(html_text):
+      attrs = f"{before_attrs} {after_attrs}"
+      context_match = re.search(r"\bcontextRef=\"([^\"]+)\"", attrs, re.IGNORECASE)
+      if context_match is None:
+        continue
+      context_ref = context_match.group(1)
+      context = contexts.get(context_ref)
+      if context is None:
+        continue
+      year, dimensions = context
+      if not _is_allowed_common_stock_context(dimensions):
+        continue
+      value = _parse_share_count_value(raw_value)
+      if value is None:
+        continue
+      scale_match = re.search(r"\bscale=\"(-?\d+)\"", attrs, re.IGNORECASE)
+      scale = int(scale_match.group(1)) if scale_match is not None else 0
+      values_by_year.setdefault(year, {})[context_ref] = _apply_fact_scale(value, scale)
+
+  return {
+    year: sum(context_values.values())
+    for year, context_values in sorted(values_by_year.items())
+    if context_values
+  }
+
+def _is_common_stock_units_row(row_text: str) -> bool:
+  normalized = _normalize_label_text(row_text)
+  if "outstanding" not in normalized:
+    return False
+  if "preferred" in normalized:
+    return False
+  if not any(marker in normalized for marker in ("common stock", "ordinary share", "class a", "class b")):
+    return False
+  return any(marker in normalized for marker in ("shares authorized", "par value", "issued and outstanding"))
+
+def _extract_common_stock_units_from_row_text(row_text: str) -> dict[str, int]:
+  normalized = _normalize_metric_text(html.unescape(row_text))
+  results: dict[str, int] = {}
+
+  paired_values_pattern = re.compile(
+    r"\b(no|\d[\d,]*)\s+and\s+(no|\d[\d,]*)\s+shares?\s+(?:issued\s+and\s+)?outstanding(?:\s+as\s+of|\s+at)?"
+    r".{0,80}?(20\d{2})\s+and\s+.{0,40}?(20\d{2}).{0,80}?\brespectively\b"
+  )
+  same_value_pattern = re.compile(
+    r"\b(no|\d[\d,]*)\s+shares?\s+(?:issued\s+and\s+)?outstanding(?:\s+as\s+of|\s+at)?"
+    r".{0,80}?(20\d{2})\s+and\s+.{0,40}?(20\d{2})(?:.{0,80}?\brespectively\b)?"
+  )
+  repeated_pattern = re.compile(
+    r"\b(no|\d[\d,]*)\s+shares?\s+(?:issued\s+and\s+)?outstanding(?:\s+as\s+of|\s+at)?"
+    r".{0,80}?(20\d{2})\b"
+  )
+
+  for first_value_text, second_value_text, first_year, second_year in paired_values_pattern.findall(normalized):
+    first_value = _parse_share_count_value(first_value_text)
+    second_value = _parse_share_count_value(second_value_text)
+    if first_value is not None:
+      results[first_year] = first_value
+    if second_value is not None:
+      results[second_year] = second_value
+
+  if results:
+    return results
+
+  for value_text, first_year, second_year in same_value_pattern.findall(normalized):
+    value = _parse_share_count_value(value_text)
+    if value is None:
+      continue
+    results[first_year] = value
+    results[second_year] = value
+
+  if results:
+    return results
+
+  for value_text, year in repeated_pattern.findall(normalized):
+    value = _parse_share_count_value(value_text)
+    if value is None:
+      continue
+    results[year] = value
+
+  return results
+
+def _extract_common_stock_units_from_table(table) -> dict[str, int]:
+  share_scale = _detect_share_scale(table)
+  values_by_year: dict[str, int] = {}
+
+  for row in table.find_all("tr"):
+    row_text = row.get_text(" ", strip=True)
+    if not _is_common_stock_units_row(row_text):
+      continue
+    row_values = _extract_common_stock_units_from_row_text(row_text)
+    for year, value in row_values.items():
+      scaled_value = value * share_scale
+      values_by_year[year] = values_by_year.get(year, 0) + scaled_value
+
+  return values_by_year
+
+def _extract_cover_page_common_stock_units(html_text: str) -> dict[str, int]:
+  normalized = _normalize_metric_text(_strip_html_tags(html_text))
+  patterns = (
+    re.compile(
+      r"\b(?P<value>\d[\d,]*)\s+shares?\s+of\s+(?:common\s+stock|ordinary\s+shares?)\b.{0,160}?\bissued\s+and\s+outstanding\s+as\s+of\b.{0,80}?(?P<year>20\d{2})"
+    ),
+    re.compile(
+      r"\bas\s+of\b.{0,80}?(?P<year>20\d{2}).{0,160}?\b(?:had|were)\s+(?P<value>\d[\d,]*)\s+outstanding\s+shares?\s+of\s+(?:common\s+stock|ordinary\s+shares?)"
+    ),
+    re.compile(
+      r"\bnumber\s+of\s+(?:common|ordinary)\s+shares?.{0,120}?\boutstanding\s+as\s+of\b.{0,80}?(?P<year>20\d{2}).{0,80}?:\s*(?P<value>\d[\d,]*)\s+shares?"
+    ),
+    re.compile(
+      r"\bindicate\s+the\s+number\s+of\s+shares?\s+outstanding\b.{0,120}?:\s*(?P<value>\d[\d,]*)\s+shares?\s+of\s+common\s+stock\b.{0,120}?\bas\s+of\b.{0,80}?(?P<year>20\d{2})"
+    ),
+  )
+
+  for pattern in patterns:
+    match = pattern.search(normalized)
+    if match is None:
+      continue
+    year = match.group("year")
+    value_text = match.group("value")
+    value = _parse_share_count_value(value_text)
+    if value is not None:
+      return {year: value}
+
+  return {}
+
+def extract_common_stock_units(table, filing_html: str = "") -> dict[str, int]:
+  xbrl_year_end_values = _extract_xbrl_common_stock_units(
+    filing_html,
+    ("us-gaap:CommonStockSharesOutstanding",),
+  )
+  if xbrl_year_end_values:
+    return xbrl_year_end_values
+
+  table_values = _extract_common_stock_units_from_table(table)
+  if table_values:
+    return table_values
+
+  cover_page_xbrl_values = _extract_xbrl_common_stock_units(
+    filing_html,
+    ("dei:EntityCommonStockSharesOutstanding",),
+  )
+  if cover_page_xbrl_values:
+    return cover_page_xbrl_values
+
+  return _extract_cover_page_common_stock_units(filing_html)
 
 
 def extract_current_assets(table) -> dict[str, int]:
@@ -979,6 +1231,7 @@ def extract_short_term_debt(table) -> dict[str, int]:
 CONSOLIDATED_BALANCE_SHEET_RULES = [has_mandatory_metrics]
 
 METRIC_EXTRACT = {
+  COMMON_STOCK_UNITS_KEY: extract_common_stock_units,
   CURRENT_ASSETS_KEY: extract_current_assets,
   CURRENT_LIABILITIES_KEY: extract_current_liabilities,
   TOTAL_ASSETS_KEY: extract_total_assets,

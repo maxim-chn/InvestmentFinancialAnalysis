@@ -51,8 +51,9 @@ files into normalized financial metrics and publishes them to Kafka.
 **What it does:**
 * Reads filings from `assets/filings_10k/<ticker>/filing-YYYY-*.htm(l)`.
 * Extracts key metrics from Consolidated Balance Sheet and Consolidated Cash Flow tables:
-  `current_assets`, `current_liabilities`, `short_term_debt`, `long_term_debt`,
-  `stockholders_equity`, `total_assets`, `net_income`, `interest_expense`, `tax_expense`.
+  `common_stock_units`, `current_assets`, `current_liabilities`, `short_term_debt`,
+  `long_term_debt`, `stockholders_equity`, `total_assets`, `net_income`,
+  `interest_expense`, `tax_expense`.
 * Merges filing-level metrics into one consolidated payload per company (from fiscal year 2015+).
 * Publishes one JSON message per company to the configured Kafka topic.
 

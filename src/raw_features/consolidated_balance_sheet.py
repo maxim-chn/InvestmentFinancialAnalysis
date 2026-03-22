@@ -1,9 +1,11 @@
+import json
 import re
 from typing import Iterator, List, Optional, Tuple
 
 from src.raw_features.consolidated_balance_sheet_rules import (
   CONSOLIDATED_BALANCE_SHEET_RULES,
   METRIC_EXTRACT,
+  extract_common_stock_units,
   extract_fiscal_years,
   extract_units,
 )
@@ -137,7 +139,10 @@ def read_raw_balance_sheet(inputs: Iterator[Tuple[str, str]]) -> Iterator[Tuple[
         yield company, f"{BALANCE_SHEET_ERR_TEMPLATE} -- read too many Consolidated Balance Sheet from 10-K filing"
         continue
 
-      yield company, selected_table
+      yield company, json.dumps({
+        "path": path,
+        "table": selected_table,
+      })
   except Exception as e:
     yield company, f"{BALANCE_SHEET_ERR_TEMPLATE} -- unexpected exception during Consolidated Balance Sheet read -- {e}"
 
@@ -147,6 +152,20 @@ def extract_metrics(inputs: Iterator[Tuple[str, str]]) -> Iterator[Tuple[str, st
     import pandas as pd
 
     for company, serialized_html_table in inputs:
+      filing_path: Optional[str] = None
+      filing_html = ""
+      try:
+        payload = json.loads(serialized_html_table)
+        filing_path = payload.get("path")
+        serialized_html_table = payload.get("table", serialized_html_table)
+      except (TypeError, json.JSONDecodeError):
+        pass
+
+      if filing_path:
+        original_filing = read_original_filing(company, filing_path)
+        if original_filing is not None:
+          _company, _filing_name, filing_html = original_filing
+
       soup = BeautifulSoup(serialized_html_table, "html.parser")
       table = soup.find("table")
       if table is None:
@@ -154,6 +173,7 @@ def extract_metrics(inputs: Iterator[Tuple[str, str]]) -> Iterator[Tuple[str, st
         continue
 
       metrics = {
+        RAW_FEATURES.COMMON_STOCK_UNITS.value: extract_common_stock_units(table, filing_html),
         RAW_FEATURES.CURRENT_ASSETS.value: METRIC_EXTRACT[RAW_FEATURES.CURRENT_ASSETS.value](table),
         RAW_FEATURES.CURRENT_LIABILITIES.value: METRIC_EXTRACT[RAW_FEATURES.CURRENT_LIABILITIES.value](table),
         RAW_FEATURES.SHORT_TERM_DEBT.value: METRIC_EXTRACT[RAW_FEATURES.SHORT_TERM_DEBT.value](table),
