@@ -113,10 +113,17 @@ do_import: raw_features
 	@if [ -d "$(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)" ] && [ "$$(ls -A "$(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)" 2>/dev/null)" ]; then \
 		echo "WARN: assets import is skipped because assets already exist: $(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)"; \
 	else \
-		mkdir -p "$(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)"; \
-			unzip -qo "$(RAW_FEATURES_SPARK_PUBLISHER_ASSETS_EXPORT)" -d "$(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)"; \
-			echo "INFO: assets imported to $(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)"; \
-		fi
+		if [ ! -d "$(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)" ]; then \
+			mkdir -p "$(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)"; \
+		fi; \
+		unzip -qo "$(RAW_FEATURES_SPARK_PUBLISHER_ASSETS_EXPORT)" -d "$(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)"; \
+		echo "INFO: assets imported to $(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)"; \
+	fi
+
+run-altman-dual-etl:
+	@echo "Starting Dual-Scoring Spark Consumer (Original Z-Score & Z'-Score)..."
+	RAW_FEATURES_SPARK_PUBLISHER_ROOT="$(RAW_FEATURES_SPARK_PUBLISHER_ROOT)" \
+	spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.2.1 spark_altman_dual_etl.py
 
 run-altman-etl:
 	RAW_FEATURES_SPARK_PUBLISHER_ROOT="$(RAW_FEATURES_SPARK_PUBLISHER_ROOT)" \
@@ -128,6 +135,16 @@ run-altman-zprime-etl:
 
 run-producer:
 	python3 produser.py
+
+demo-phase1:
+	@echo "=== INITIATING PHASE 1: Historical Data Loading (2015-2020) ==="
+	@echo "Publishing initial dataset to Kafka topic: $(RAW_FEATURES_SPARK_PUBLISHER_TARGET_KAFKA_CHANNEL)"
+	START_YEAR=2015 END_YEAR=2020 $(PYTHON) $(publisher_script)
+
+demo-phase2:
+	@echo "=== INITIATING PHASE 2: Live Stream Simulation (2021-2024) ==="
+	@echo "Publishing fresh annual reports to Kafka topic: $(RAW_FEATURES_SPARK_PUBLISHER_TARGET_KAFKA_CHANNEL)"
+	START_YEAR=2021 END_YEAR=2024 $(PYTHON) $(publisher_script)
 
 %:
 	@echo "ERROR: unsupported component '$@'. Supported component: $(supported_component)"
