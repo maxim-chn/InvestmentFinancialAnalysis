@@ -6,6 +6,7 @@ from src.raw_features.constants import RAW_FEATURES
 COMMON_STOCK_UNITS_KEY = RAW_FEATURES.COMMON_STOCK_UNITS.value
 CURRENT_ASSETS_KEY = RAW_FEATURES.CURRENT_ASSETS.value
 CURRENT_LIABILITIES_KEY = RAW_FEATURES.CURRENT_LIABILITIES.value
+MARKET_CAP_KEY = RAW_FEATURES.MARKET_CAP.value
 TOTAL_ASSETS_KEY = RAW_FEATURES.TOTAL_ASSETS.value
 LONG_TERM_DEBT_KEY = RAW_FEATURES.LONG_TERM_DEBT.value
 SHORT_TERM_DEBT_KEY = RAW_FEATURES.SHORT_TERM_DEBT.value
@@ -1227,6 +1228,142 @@ def extract_short_term_debt(table) -> dict[str, int]:
     return {year: 0 for year in years}
 
   return {}
+
+# ---------------------------------------------------------------------------
+# Cover-page market-cap extraction
+# ---------------------------------------------------------------------------
+
+def _parse_dollar_amount(text: str) -> Optional[float]:
+  """
+  Parse a dollar amount from a text fragment.  Handles:
+    - Exact amounts with commas:  "$709,923,000,000"
+    - Abbreviated amounts:        "$332.7 million", "$2.6 billion"
+  Returns the value in absolute dollars, or None if unparseable.
+  """
+  # Remove leading $ / USD markers and whitespace
+  text = re.sub(r"^\s*(?:usd|\$)\s*", "", text.strip(), flags=re.IGNORECASE)
+  text = text.strip()
+
+  # Try abbreviated form first: "332.7 million" / "2.6 billion" / "1.2 trillion"
+  abbrev_match = re.match(
+    r"^([\d,]+(?:\.\d+)?)\s*(thousand|million|billion|trillion)\b",
+    text,
+    re.IGNORECASE,
+  )
+  if abbrev_match:
+    raw_num = abbrev_match.group(1).replace(",", "")
+    try:
+      value = float(raw_num)
+    except ValueError:
+      return None
+    unit = abbrev_match.group(2).lower()
+    multipliers = {
+      "thousand": 1_000.0,
+      "million": 1_000_000.0,
+      "billion": 1_000_000_000.0,
+      "trillion": 1_000_000_000_000.0,
+    }
+    return value * multipliers[unit]
+
+  # Try exact form: "709,923,000,000"
+  exact_match = re.match(r"^([\d,]+(?:\.\d+)?)\b", text)
+  if exact_match:
+    raw_num = exact_match.group(1).replace(",", "")
+    try:
+      return float(raw_num)
+    except ValueError:
+      return None
+
+  return None
+
+
+def _extract_xbrl_entity_public_float(html_text: str) -> Optional[float]:
+  """
+  Extract dei:EntityPublicFloat from inline XBRL (iXBRL) filings.
+  Returns the value in absolute dollars, or None if not found.
+  """
+  pattern = re.compile(
+    r"<(?:ix:)?nonFraction\b([^>]*)\bname=\"dei:EntityPublicFloat\"([^>]*)>(.*?)</(?:ix:)?nonFraction>",
+    re.IGNORECASE | re.DOTALL,
+  )
+  best: Optional[float] = None
+  for before_attrs, after_attrs, raw_value in pattern.findall(html_text):
+    attrs = f"{before_attrs} {after_attrs}"
+    # Parse scale attribute (e.g. scale="6" means ×10^6)
+    scale_match = re.search(r"\bscale=\"(-?\d+)\"", attrs, re.IGNORECASE)
+    scale = int(scale_match.group(1)) if scale_match else 0
+    # Strip HTML tags from value
+    clean_value = re.sub(r"<[^>]+>", "", raw_value)
+    clean_value = html.unescape(re.sub(r"\s+", " ", clean_value)).strip().replace(",", "")
+    try:
+      numeric = float(clean_value)
+    except ValueError:
+      continue
+    absolute = _apply_fact_scale(int(numeric), scale) if scale != 0 else numeric
+    if best is None or absolute > best:
+      best = float(absolute)
+  return best
+
+
+def extract_market_cap_from_cover_page(html_text: str) -> Optional[float]:
+  """
+  Extract the aggregate market value (public float) from the 10-K cover page.
+
+  Priority:
+  1. Inline XBRL ``dei:EntityPublicFloat`` tag (most reliable, newer filings).
+  2. Plain-text pattern: "aggregate market value … was approximately $<amount>"
+     supporting both exact dollar strings and abbreviated forms
+     (e.g. "$332.7 million", "$2.6 billion").
+
+  Returns the value in **absolute dollars** (not millions/thousands), or None
+  when the cover page does not disclose a parseable figure.
+
+  Note: This is the *public float* (non-affiliate shares only), which is a
+  conservative lower bound on total market cap.  It is used as a direct
+  substitute for ``common_stock_units × price`` in the Altman Z-Score
+  Original formula when available, avoiding the unit-scaling ambiguity of
+  the share-count approach.
+  """
+  if not html_text or not html_text.strip():
+    return None
+
+  # --- Priority 1: inline XBRL ---
+  xbrl_value = _extract_xbrl_entity_public_float(html_text)
+  if xbrl_value is not None and xbrl_value > 0:
+    return xbrl_value
+
+  # --- Priority 2: plain-text pattern ---
+  stripped = re.sub(r"<[^>]+>", " ", html_text)
+  stripped = html.unescape(re.sub(r"\s+", " ", stripped))
+
+  # Two common cover-page formats:
+  #   A) "… was approximately $709,923,000,000"
+  #   B) "… as of June 30, 2014: $219,360,386"
+  text_patterns = [
+    # Format A: "was [approximately] $<amount>"
+    re.compile(
+      r"aggregate\s+market\s+value\b.{0,400}?"
+      r"(?:was\s+(?:approximately\s+)?|approximately\s+)"
+      r"(?:\$|usd\s*)\s*([\d,]+(?:\.\d+)?(?:\s*(?:thousand|million|billion|trillion))?)",
+      re.IGNORECASE | re.DOTALL,
+    ),
+    # Format B: "… :<whitespace>$<amount>"
+    re.compile(
+      r"aggregate\s+market\s+value\b.{0,400}?"
+      r":\s*(?:\$|usd\s*)\s*([\d,]+(?:\.\d+)?(?:\s*(?:thousand|million|billion|trillion))?)",
+      re.IGNORECASE | re.DOTALL,
+    ),
+  ]
+  for text_pattern in text_patterns:
+    match = text_pattern.search(stripped)
+    if match:
+      amount_text = match.group(1).strip()
+      value = _parse_dollar_amount(amount_text)
+      if value is not None and value > 0:
+        return value
+
+  return None
+
 
 CONSOLIDATED_BALANCE_SHEET_RULES = [has_mandatory_metrics]
 

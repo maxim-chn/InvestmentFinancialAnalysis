@@ -162,11 +162,11 @@ def normalize_units_before_kafka(company_records: list) -> list:
             break
 
     # Financial fields that must be scaled to absolute values.
-    # NOTE: common_stock_units is a share COUNT (not a monetary amount) and
-    # must NOT be multiplied by the unit scale factor.  It is already reported
-    # as an absolute number of shares in the filing; scaling it would produce
-    # an astronomically large market_cap (shares × multiplier × price) and
-    # corrupt Z_Score_Original via X4_Original.
+    # Excluded fields:
+    #   - common_stock_units: share COUNT (not monetary); already absolute.
+    #     Scaling it would inflate market_cap = shares × multiplier × price.
+    #   - market_cap: extracted directly in absolute dollars from the cover
+    #     page (dei:EntityPublicFloat or text pattern); must NOT be re-scaled.
     fields_to_multiply = [
         "current_assets",
         "current_liabilities",

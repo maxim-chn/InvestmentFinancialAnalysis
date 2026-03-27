@@ -47,7 +47,8 @@ def get_schema() -> StructType:
         StructField("interest_expense", FloatType(), True),
         StructField("tax_expense", FloatType(), True),
         StructField("total_revenue", FloatType(), True),
-        StructField("price", StringType(), True)
+        StructField("price", StringType(), True),
+        StructField("market_cap", FloatType(), True),
     ])
 
 def data_quality_gate(df: DataFrame) -> DataFrame:
@@ -76,6 +77,11 @@ def preprocess_and_engineer_features(df: DataFrame) -> DataFrame:
     Unit normalization (millions/thousands → absolute values) is applied upstream
     on the producer side (normalize_units_before_kafka in combined_metrics.py)
     before records are published to Kafka, so values arrive already in absolute form.
+
+    Market-cap resolution (priority order):
+      1. cover_page_market_cap  – extracted directly from the 10-K cover page
+         (dei:EntityPublicFloat or text pattern); already in absolute dollars.
+      2. common_stock_units × price – fallback when cover-page value is absent.
     """
     # 1. Sanitize Price
     df = df.withColumn(
@@ -97,11 +103,28 @@ def preprocess_and_engineer_features(df: DataFrame) -> DataFrame:
             .otherwise(col(field))
         )
 
-    # 3. Feature Engineering
+    # 3. Sanitize cover-page market_cap (keep None/NaN as null – not 0)
+    df = df.withColumn(
+        "cover_page_market_cap",
+        when(
+            col("market_cap").isNull() | isnan(col("market_cap")) | (col("market_cap") <= 0),
+            lit(None).cast("float")
+        ).otherwise(col("market_cap"))
+    )
+
+    # 4. Feature Engineering
     df = df.withColumn("total_liabilities", col("current_liabilities") + col("long_term_debt") + col("short_term_debt"))
     df = df.withColumn("ebit", col("net_income") + col("interest_expense") + col("tax_expense"))
-    df = df.withColumn("market_cap", col("common_stock_units") * col("clean_price"))
-    
+
+    # Resolve market_cap: prefer cover-page value; fall back to shares × price
+    df = df.withColumn(
+        "market_cap",
+        when(
+            col("cover_page_market_cap").isNotNull(),
+            col("cover_page_market_cap")
+        ).otherwise(col("common_stock_units") * col("clean_price"))
+    ).drop("cover_page_market_cap")
+
     return df
 
 def calculate_dual_z_scores(df: DataFrame) -> DataFrame:

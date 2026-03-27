@@ -7,6 +7,7 @@ from src.raw_features.consolidated_balance_sheet_rules import (
   METRIC_EXTRACT,
   extract_common_stock_units,
   extract_fiscal_years,
+  extract_market_cap_from_cover_page,
   extract_units,
 )
 from src.raw_features.constants import BALANCE_SHEET_ERR_TEMPLATE, RAW_FEATURES
@@ -191,6 +192,16 @@ def extract_metrics(inputs: Iterator[Tuple[str, str]]) -> Iterator[Tuple[str, st
           f"{BALANCE_SHEET_ERR_TEMPLATE} -- failed to detect fiscal years in Consolidated Balance Sheet"
         )
         continue
+
+      # Extract market cap (public float) from the cover page.
+      # The cover page reports a single aggregate market value for the filing
+      # period; we associate it with the most recent fiscal year in the filing.
+      cover_market_cap = extract_market_cap_from_cover_page(filing_html)
+      market_cap_by_year: dict = {}
+      if cover_market_cap is not None:
+        most_recent_year = max(all_years)
+        market_cap_by_year[most_recent_year] = cover_market_cap
+      metrics[RAW_FEATURES.MARKET_CAP.value] = market_cap_by_year
 
       # Keep pipeline continuity when metrics are not disclosed/extractable.
       for metric_values in metrics.values():
