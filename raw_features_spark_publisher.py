@@ -12,7 +12,11 @@ from typing import Dict, List, Optional, Tuple
 
 from pyspark.sql import SparkSession
 
-from src.raw_features.combined_metrics import combine_metrics, parse_metric_column
+from src.raw_features.combined_metrics import (
+  combine_metrics,
+  normalize_units_before_kafka,
+  parse_metric_column,
+)
 from src.raw_features.consolidated_balance_sheet import (
   extract_metrics as extract_balance_sheet_metrics,
   read_raw_balance_sheet
@@ -156,9 +160,25 @@ def build_year_first_publish_records(
         units = {}
         year_payload["units"] = units
       units["price"] = "$"
-      rows_by_year.setdefault(year, []).append(
-        (ticker, json.dumps(year_payload))
+      rows_by_year.setdefault(year, []).append((ticker, year_payload))
+
+  # --- Spark driver stage: normalise units → absolute values before Kafka ---
+  # Group all per-company records, apply normalize_units_before_kafka, then
+  # flatten back into the year-keyed structure for ordered publishing.
+  records_by_company: Dict[str, List[dict]] = {}
+  for year, ticker_payloads in rows_by_year.items():
+    for ticker, payload in ticker_payloads:
+      records_by_company.setdefault(ticker, []).append(payload)
+
+  normalised_rows_by_year: Dict[int, List[Tuple[str, str]]] = {}
+  for ticker, company_records in records_by_company.items():
+    normalised = normalize_units_before_kafka(company_records)
+    for record in normalised:
+      year = record["year"]
+      normalised_rows_by_year.setdefault(year, []).append(
+        (ticker, json.dumps(record))
       )
+  rows_by_year = normalised_rows_by_year
 
   ordered_records: List[Tuple[int, str, str]] = []
   for year in sorted(rows_by_year.keys()):

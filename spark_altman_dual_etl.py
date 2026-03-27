@@ -11,7 +11,7 @@ import os
 import shutil
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import col, from_json, when, lit, round, isnan
-from pyspark.sql.types import StructType, StructField, StringType, FloatType, IntegerType, MapType
+from pyspark.sql.types import StructType, StructField, StringType, FloatType, IntegerType
 
 # Import the native logger from your project structure
 from src.raw_features.logger import log_message
@@ -29,7 +29,7 @@ def clean_silver_storage():
     """
     if os.path.exists(SILVER_STORAGE_PATH):
         shutil.rmtree(SILVER_STORAGE_PATH)
-        log_message(f"Cleared previous state at {SILVER_STORAGE_PATH}", "INFO")
+        log_message(f"Cleared previous state at {SILVER_STORAGE_PATH}", APP_NAME, "INFO")
 
 def get_schema() -> StructType:
     return StructType([
@@ -47,8 +47,7 @@ def get_schema() -> StructType:
         StructField("interest_expense", FloatType(), True),
         StructField("tax_expense", FloatType(), True),
         StructField("total_revenue", FloatType(), True),
-        StructField("price", StringType(), True), 
-        StructField("units", MapType(StringType(), StringType()), True)
+        StructField("price", StringType(), True)
     ])
 
 def data_quality_gate(df: DataFrame) -> DataFrame:
@@ -73,39 +72,32 @@ def data_quality_gate(df: DataFrame) -> DataFrame:
 
 def preprocess_and_engineer_features(df: DataFrame) -> DataFrame:
     """
-    Sanitizes values, applies multipliers, and computes derived financial metrics.
+    Sanitizes values and computes derived financial metrics.
+    Unit normalization (millions/thousands → absolute values) is applied upstream
+    on the producer side (normalize_units_before_kafka in combined_metrics.py)
+    before records are published to Kafka, so values arrive already in absolute form.
     """
     # 1. Sanitize Price
     df = df.withColumn(
-        "clean_price", 
+        "clean_price",
         when(col("price") == "N/A", lit(None).cast("float"))
         .otherwise(col("price").cast("float"))
     )
 
-    # 2. Extract Unit Multiplier
-    df = df.withColumn("unit_str", col("units").getItem("current_assets"))
-    df = df.withColumn(
-        "multiplier",
-        when(col("unit_str").rlike("(?i)millions"), lit(1_000_000.0))
-        .when(col("unit_str").rlike("(?i)thousands"), lit(1_000.0))
-        .otherwise(lit(1_000_000.0))
-    )
-
-    fields_to_multiply = [
-        "common_stock_units", "current_assets", "current_liabilities", 
-        "short_term_debt", "long_term_debt", "retained_earnings", 
-        "stockholders_equity", "total_assets", "net_income", 
+    # 2. Sanitize NaN/null financial fields → 0.0 (no unit scaling needed here)
+    fields_to_sanitize = [
+        "common_stock_units", "current_assets", "current_liabilities",
+        "short_term_debt", "long_term_debt", "retained_earnings",
+        "stockholders_equity", "total_assets", "net_income",
         "interest_expense", "tax_expense", "total_revenue"
     ]
-    
-    # 3. Apply Multiplier and Bulletproof against missing secondary metrics (e.g., 0 debt)
-    for field in fields_to_multiply:
-        df = df.withColumn(field, 
+    for field in fields_to_sanitize:
+        df = df.withColumn(field,
             when(col(field).isNull() | isnan(col(field)), lit(0.0))
-            .otherwise(col(field)) * col("multiplier")
+            .otherwise(col(field))
         )
 
-    # 4. Feature Engineering
+    # 3. Feature Engineering
     df = df.withColumn("total_liabilities", col("current_liabilities") + col("long_term_debt") + col("short_term_debt"))
     df = df.withColumn("ebit", col("net_income") + col("interest_expense") + col("tax_expense"))
     df = df.withColumn("market_cap", col("common_stock_units") * col("clean_price"))
@@ -173,7 +165,7 @@ def process_micro_batch(batch_df: DataFrame, batch_id: int):
     if record_count == 0:
         return
 
-    log_message(f"[Batch {batch_id}] Intercepted {record_count} raw records from Kafka.", "INFO")
+    log_message(f"[Batch {batch_id}] Intercepted {record_count} raw records from Kafka.", APP_NAME, "INFO")
 
     # --- ROUTING: DATA QUALITY GATE ---
     bad_df = batch_df.filter(col("is_valid_record") == False)
@@ -184,15 +176,15 @@ def process_micro_batch(batch_df: DataFrame, batch_id: int):
 
     # --- DEAD LETTER LOGGING (Handling Corrupted Data) ---
     if bad_count > 0:
-        log_message(f"[Batch {batch_id}] DATA QUALITY ALERT: Dropping {bad_count} invalid records.", "WARNING")
+        log_message(f"[Batch {batch_id}] DATA QUALITY ALERT: Dropping {bad_count} invalid records.", APP_NAME, "WARNING")
         corrupted_rows = bad_df.select("ticker", "year").collect()
         for row in corrupted_rows:
-            log_message(f"[Batch {batch_id}] REJECTED: Ticker '{row.ticker}' for Year '{row.year}'. Reason: Missing/NaN critical financial fields or Total Assets <= 0.", "WARNING")
+            log_message(f"[Batch {batch_id}] REJECTED: Ticker '{row.ticker}' for Year '{row.year}'. Reason: Missing/NaN critical financial fields or Total Assets <= 0.", APP_NAME, "WARNING")
 
     # --- DASHBOARD GENERATION (Handling Clean Data) ---
     if good_count > 0:
-        log_message(f"[Batch {batch_id}] Proceeding with {good_count} valid records.", "INFO")
-        
+        log_message(f"[Batch {batch_id}] Proceeding with {good_count} valid records.", APP_NAME, "INFO")
+
         print(f"\n=======================================================")
         print(f"📥 [BATCH {batch_id}] NEW VALID STREAM DATA")
         print(f"=======================================================")
@@ -232,11 +224,11 @@ def process_micro_batch(batch_df: DataFrame, batch_id: int):
             ORDER BY year DESC, rank ASC
         """).show(n=50, truncate=False)
         
-        log_message(f"[Batch {batch_id}] Dashboards successfully recalculated.", "INFO")
+        log_message(f"[Batch {batch_id}] Dashboards successfully recalculated.", APP_NAME, "INFO")
 
 if __name__ == "__main__":
     try:
-        log_message(f"Initializing {APP_NAME}...", "INFO")
+        log_message(f"Initializing {APP_NAME}...", APP_NAME, "INFO")
         clean_silver_storage()
 
         spark = SparkSession.builder \
@@ -262,7 +254,7 @@ if __name__ == "__main__":
         clean_stream = preprocess_and_engineer_features(validated_stream)
         scored_stream = calculate_dual_z_scores(clean_stream)
 
-        log_message("Starting continuous stream and dashboard engine...", "INFO")
+        log_message("Starting continuous stream and dashboard engine...", APP_NAME, "INFO")
 
         # Start Stream and execute micro-batches
         query = scored_stream.writeStream \
@@ -273,5 +265,5 @@ if __name__ == "__main__":
         query.awaitTermination()
 
     except Exception as e:
-        log_message(f"Fatal error: {str(e)}", "ERROR")
+        log_message(f"Fatal error: {str(e)}", APP_NAME, "ERROR")
         raise e

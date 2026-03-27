@@ -124,6 +124,84 @@ def merge_company_metric_frames(
 
   return consolidated_rows
 
+# ---------------------------------------------------------------------------
+# Unit normalisation – Spark driver stage, runs before Kafka publish
+# ---------------------------------------------------------------------------
+
+def normalize_units_before_kafka(company_records: list) -> list:
+    """
+    Converts every financial field in a per-company record list from its
+    reported unit (millions / thousands) to absolute values **before** the
+    records are serialised and published to Kafka.
+
+    This keeps the consumer (spark_altman_dual_etl.py) free of unit logic:
+    it receives plain absolute numbers and can apply financial ratios directly.
+
+    Strategy
+    --------
+    1. Sort records by year so the earliest available unit declaration is used
+       as the ``base_multiplier`` fallback for years that carry no unit metadata
+       (cold-start protection).
+    2. For each record, derive the per-record multiplier from the ``units`` map
+       stored under the ``current_assets`` key (representative field).
+       Fall back to ``base_multiplier`` when the key is absent or unrecognised.
+    3. Multiply every listed financial field by the resolved multiplier and
+       drop the ``units`` map – it is no longer needed downstream.
+    """
+    records = sorted(company_records, key=lambda x: x["year"])
+
+    # --- Pass 1: determine base_multiplier from the earliest unit declaration ---
+    base_multiplier = 1_000_000.0  # SEC default (millions)
+    for rec in records:
+        units_str = str(rec.get("units", {}).get("current_assets", "")).lower()
+        if "millions" in units_str:
+            base_multiplier = 1_000_000.0
+            break
+        elif "thousands" in units_str:
+            base_multiplier = 1_000.0
+            break
+
+    # Financial fields that must be scaled to absolute values.
+    # NOTE: common_stock_units is a share COUNT (not a monetary amount) and
+    # must NOT be multiplied by the unit scale factor.  It is already reported
+    # as an absolute number of shares in the filing; scaling it would produce
+    # an astronomically large market_cap (shares × multiplier × price) and
+    # corrupt Z_Score_Original via X4_Original.
+    fields_to_multiply = [
+        "current_assets",
+        "current_liabilities",
+        "total_assets",
+        "net_income",
+        "total_revenue",
+        "stockholders_equity",
+        "retained_earnings",
+        "short_term_debt",
+        "long_term_debt",
+        "interest_expense",
+        "tax_expense",
+    ]
+
+    # --- Pass 2: apply multiplier field-by-field per record ---
+    for rec in records:
+        units_str = str(rec.get("units", {}).get("current_assets", "")).lower()
+        if "millions" in units_str:
+            current_mult = 1_000_000.0
+        elif "thousands" in units_str:
+            current_mult = 1_000.0
+        else:
+            # Cold-start: no unit metadata for this record – reuse base
+            current_mult = base_multiplier
+
+        for field in fields_to_multiply:
+            if field in rec and rec[field] is not None:
+                rec[field] = float(rec[field]) * current_mult
+
+        # Remove units map – consumer no longer needs it
+        rec.pop("units", None)
+
+    return records
+
+
 def combine_metrics(
   balance_sheet_metrics: Sequence[Tuple[str, str]],
   cashflow_metrics: Sequence[Tuple[str, str]],
